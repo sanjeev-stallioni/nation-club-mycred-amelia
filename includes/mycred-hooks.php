@@ -198,6 +198,10 @@ function mycred_process_appointment($appointment, $trigger)
             return;
         }
 
+        // Preserve full invoice for reward calculation. Rewards are always
+        // earned on the full service value, independent of any redemption.
+        $original_invoice_amount = $invoice_amount;
+
         // Get service name by service id
         $service_name = $wpdb->get_var(
             $wpdb->prepare(
@@ -318,9 +322,11 @@ function mycred_process_appointment($appointment, $trigger)
 
         // ------------------------------
         // Step 2: Reward Customer + Deduct Vendor (5%)
+        // Always calculated from the FULL invoice amount, not the
+        // post-redemption net. Redemption does not reduce earnings.
         // ------------------------------
-        if (!$already_awarded && floatval($invoice_amount) > 0) {
-            $base_amount = round(floatval($invoice_amount), 2);
+        if (!$already_awarded && $original_invoice_amount > 0) {
+            $base_amount = round($original_invoice_amount, 2);
             $points = round($base_amount * $percent, 2);
 
             $wlog("Convert points from invoice: {$points} pts.");
@@ -381,7 +387,7 @@ function mycred_process_appointment($appointment, $trigger)
         } else {
             if ($already_awarded) {
                 $wlog("⏸ Already awarded for appt {$appointmentId}, skipping reward.");
-            } elseif (floatval($invoice_amount) <= 0) {
+            } elseif ($original_invoice_amount <= 0) {
                 $wlog("⏸ Invoice amount zero, skipping reward.");
             }
         }
