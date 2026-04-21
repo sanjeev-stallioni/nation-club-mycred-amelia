@@ -36,9 +36,25 @@
                 },
                 success: function(response) {
                     if (response.success) {
-                        // Inject the points into the customer info section
-                        const pointsDisplay = $('<div class="am-capai-customer__data" style="font-weight: 600; font-size: 14px"><span style="font-weight: 400;" class="am-icon-circle-info"></span> Points holding: <strong>' + response.data.points + '</strong></div><div class="am-capai-customer__data" style="font-weight: 600; font-size: 14px"><span style="font-weight: 400;" class="am-icon-circle-info"></span> Last service: <strong>' + response.data.last_service + '</strong></div>');
-                        modal.find('#pane-customers .am-capai-cuf__card-info').append(pointsDisplay);
+                        const d = response.data;
+                        const rowStyle = 'font-weight: 600; font-size: 14px';
+                        const iconSpan = '<span style="font-weight: 400;" class="am-icon-circle-info"></span> ';
+
+                        let html = '';
+                        html += '<div class="am-capai-customer__data" style="' + rowStyle + '">' + iconSpan + 'Points holding: <strong>' + d.points + '</strong></div>';
+                        html += '<div class="am-capai-customer__data" style="' + rowStyle + '">' + iconSpan + 'Last service: <strong>' + d.last_service + '</strong></div>';
+
+                        if (d.service_date) {
+                            html += '<div class="am-capai-customer__data" style="' + rowStyle + '">' + iconSpan + 'Service date: <strong>' + d.service_date + '</strong></div>';
+                        }
+                        if (d.last_invoice !== null && d.last_invoice !== undefined) {
+                            html += '<div class="am-capai-customer__data" style="' + rowStyle + '">' + iconSpan + 'Last invoice: <strong>SGD ' + d.last_invoice + '</strong></div>';
+                        }
+                        if (d.total_completed && parseInt(d.total_completed, 10) > 0) {
+                            html += '<div class="am-capai-customer__data" style="' + rowStyle + '">' + iconSpan + 'Total completed jobs with you: <strong>' + d.total_completed + '</strong></div>';
+                        }
+
+                        modal.find('#pane-customers .am-capai-cuf__card-info').append($(html));
                     } else {
                         // Optional: Inject error message if needed
                         const errorDisplay = $('<div class="am-capai-customer__data">Error loading myCred points: ' + (response.data || 'Unknown error') + '</div>');

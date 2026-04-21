@@ -67,18 +67,11 @@ function mycred_process_appointment($appointment, $trigger)
 
     $wlog("=== [myCRED point handling hook] Start (trigger: {$trigger}) ===");
 
-    $amelia_appointment_tbl = $wpdb->prefix . 'amelia_appointments';
-    $amelia_service_tbl     = $wpdb->prefix . 'amelia_services';
-    $amelia_users_tbl       = $wpdb->prefix . 'amelia_users';
-    $amelia_bookings_tbl    = $wpdb->prefix . 'amelia_customer_bookings';
-    $mycred_log_tbl         = $wpdb->prefix . 'mycred_log';
+    $amelia_service_tbl  = $wpdb->prefix . 'amelia_services';
+    $amelia_users_tbl    = $wpdb->prefix . 'amelia_users';
+    $amelia_bookings_tbl = $wpdb->prefix . 'amelia_customer_bookings';
 
     $booking_data = is_array($appointment['bookings']) && !empty($appointment['bookings']) ? $appointment['bookings'][0] : array();
-
-    $check_log = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $mycred_log_tbl));
-    if (!$check_log) {
-        $wlog("[myCRED point handling hook] Warning: myCRED log table {$mycred_log_tbl} not found — skipping myCRED-log dependent queries.");
-    }
 
     // reward percentages per serviceId (default 5%)
     $service_rewards = [
@@ -224,37 +217,6 @@ function mycred_process_appointment($appointment, $trigger)
             $customerId
         )));
 
-        // -------------------------------------------
-        // Detect same-vendor redemption eligibility
-        // -------------------------------------------
-        $same_vendor_points = false;
-        $current_vendor_id  = intval($providerId);
-
-        // Try meta-based detection first (simpler + faster)
-        $last_earned_vendor = intval(get_user_meta($wp_user_id, 'last_earned_vendor', true));
-        if ($last_earned_vendor > 0 && $last_earned_vendor === $current_vendor_id) {
-            $same_vendor_points = true;
-            $wlog("🔁 Same-vendor points detected via user_meta: last_vendor={$last_earned_vendor}, current={$current_vendor_id}.");
-        }
-
-        // Fallback to mycred_log if no meta match (safety check)
-        if (!$same_vendor_points && $check_log) {
-            $last_vendor_entry = $wpdb->get_row($wpdb->prepare("
-                SELECT ref_id FROM {$mycred_log_tbl}
-                WHERE user_id = %d AND ref = 'booking_reward'
-                ORDER BY id DESC LIMIT 1
-            ", $wp_user_id));
-            if ($last_vendor_entry && !empty($last_vendor_entry->ref_id)) {
-                $last_appt_provider = $wpdb->get_var($wpdb->prepare("
-                    SELECT providerId FROM {$amelia_appointment_tbl} WHERE id = %d
-                ", intval($last_vendor_entry->ref_id)));
-                if ($last_appt_provider && intval($last_appt_provider) === $current_vendor_id) {
-                    $same_vendor_points = true;
-                    $wlog("🔁 Same-vendor points confirmed via myCRED log: last_provider={$last_appt_provider}, current={$current_vendor_id}.");
-                }
-            }
-        }
-
         $wlog("Appt {$appointmentId}: invoice={$invoice_amount}, balance_before={$balance_before}, total_bookings={$user_total_bookings}");
 
         // ------------------------------
@@ -272,12 +234,13 @@ function mycred_process_appointment($appointment, $trigger)
             $origin_vendor_id = intval(get_user_meta($wp_user_id, 'last_earned_vendor', true));
 
             $customer_redeem_log_data = json_encode([
-                'service_id'        => intval($serviceId),
-                'vendor_id'         => intval($providerId),
-                'origin_vendor_id'  => $origin_vendor_id,
-                'booking_id'        => intval($bookingId),
-                'transaction_id'    => $transaction_id,
-                'customer_id'       => intval($customerId)
+                'service_id'          => intval($serviceId),
+                'vendor_id'           => intval($providerId),
+                'origin_vendor_id'    => $origin_vendor_id,
+                'liability_vendor_id' => $origin_vendor_id,
+                'booking_id'          => intval($bookingId),
+                'transaction_id'      => $transaction_id,
+                'customer_id'         => intval($customerId)
             ]);
 
             mycred_add(
@@ -299,20 +262,45 @@ function mycred_process_appointment($appointment, $trigger)
                 $wpdb->update($amelia_bookings_tbl, ['customFields' => wp_json_encode($custom_fields)], ['id' => $bookingId]);
             }
 
+            // Service vendor: credited for honoring the redemption
             $vendor_wp_user_id = intval($wpdb->get_var($wpdb->prepare(
                 "SELECT externalId FROM {$amelia_users_tbl} WHERE id = %d",
                 $providerId
             )));
 
-            if ($vendor_wp_user_id > 0 && !$same_vendor_points) {
+            if ($vendor_wp_user_id > 0) {
                 mycred_add(
-                    'vendor_accept_redeem',
+                    'redeem_accept',
                     $vendor_wp_user_id,
-                    -$redeem_amount,
+                    $redeem_amount,
                     "{$service_name} – Accepted customer redemption of " . number_format($redeem_amount, 2) . " points",
                     $appointmentId,
                     $customer_redeem_log_data
                 );
+                $wlog("↩️ Credited {$redeem_amount} pts to service vendor {$vendor_wp_user_id} (redeem_accept).");
+            }
+
+            // Liability vendor: pool debited for the old points the customer is redeeming
+            if ($origin_vendor_id > 0) {
+                $liability_vendor_wp_id = intval($wpdb->get_var($wpdb->prepare(
+                    "SELECT externalId FROM {$amelia_users_tbl} WHERE id = %d",
+                    $origin_vendor_id
+                )));
+                if ($liability_vendor_wp_id > 0) {
+                    mycred_add(
+                        'redeem_liability',
+                        $liability_vendor_wp_id,
+                        -$redeem_amount,
+                        "{$service_name} – Settled " . number_format($redeem_amount, 2) . " points redeemed by customer",
+                        $appointmentId,
+                        $customer_redeem_log_data
+                    );
+                    $wlog("⬇️ Debited {$redeem_amount} pts from liability vendor {$liability_vendor_wp_id} (redeem_liability, origin_amelia_id={$origin_vendor_id}).");
+                } else {
+                    $wlog("⚠️ Liability vendor amelia_id={$origin_vendor_id} has no wp_user mapping — skipped redeem_liability.");
+                }
+            } else {
+                $wlog("⚠️ No origin_vendor_id for appt {$appointmentId} — skipped redeem_liability (points may be from manual grant).");
             }
 
             update_user_meta($wp_user_id, 'mycred_redeemed_appt_' . $appointmentId, 1);
@@ -339,12 +327,13 @@ function mycred_process_appointment($appointment, $trigger)
                 $expiry_ts = get_mycred_customer_expiry_timestamp();
 
                 $customer_log_data = json_encode([
-                    'service_id'        => intval($serviceId),
-                    'vendor_id'         => intval($providerId),
-                    'origin_vendor_id'  => intval($providerId),
-                    'booking_id'        => intval($bookingId),
-                    'transaction_id'    => $transaction_id,
-                    'customer_id'       => intval($customerId)
+                    'service_id'          => intval($serviceId),
+                    'vendor_id'           => intval($providerId),
+                    'origin_vendor_id'    => intval($providerId),
+                    'liability_vendor_id' => intval($providerId),
+                    'booking_id'          => intval($bookingId),
+                    'transaction_id'      => $transaction_id,
+                    'customer_id'         => intval($customerId)
                 ]);
 
                 mycred_add(
@@ -370,14 +359,14 @@ function mycred_process_appointment($appointment, $trigger)
 
                 if ($vendor_wp_user_id > 0) {
                     mycred_add(
-                        'vendor_deduct',
+                        'earn_liability',
                         $vendor_wp_user_id,
                         -$points,
                         "{$service_name} – " . ($percent * 100) . "% of invoice SGD " . number_format($base_amount, 2),
                         $appointmentId,
                         $customer_log_data
                     );
-                    $wlog("⬇️ Deducted {$points} pts from vendor {$vendor_wp_user_id}.");
+                    $wlog("⬇️ Deducted {$points} pts from service vendor {$vendor_wp_user_id} (earn_liability).");
                 }
             } else {
                 $wlog("⏸ Calculated reward points is 0 for appt {$appointmentId}, base {$base_amount}.");
@@ -575,67 +564,113 @@ function get_customer_mycred_points()
         wp_send_json_error('Invalid email format');
     }
 
-    // Get WP user
-    $user = get_user_by('email', $customer_email);
-
-    if (! $user) {
+    // Get WP user (customer)
+    $customer_wp = get_user_by('email', $customer_email);
+    if (! $customer_wp) {
         wp_send_json_error('User not found');
     }
 
-    // Table names
-    $mycred_log_tbl = $wpdb->prefix . 'myCRED_log';
-    $service_tbl    = $wpdb->prefix . 'amelia_services';
-
-    // Get latest service ID from myCred log
-    $log_data = $wpdb->get_var(
-        $wpdb->prepare(
-            "
-            SELECT data
-            FROM {$mycred_log_tbl}
-            WHERE user_id = %d
-              AND ref = %s
-            ORDER BY time DESC
-            LIMIT 1
-            ",
-            $user->ID,
-            'booking_reward'
-        )
-    );
-
-    $service_id   = null;
-    $last_service = null;
-
-    if ($log_data) {
-        $decoded = json_decode($log_data, true);
-        $service_id = $decoded['service_id'] ?? null;
-    }
-
-    if ($service_id) {
-        $last_service = $wpdb->get_var(
-            $wpdb->prepare(
-                "
-                SELECT name
-                FROM {$service_tbl}
-                WHERE id = %d
-                ",
-                $service_id
-            )
-        );
-    }
-
-    // Get myCred points
     if (! function_exists('mycred_get_users_balance')) {
         wp_send_json_error('myCred not available');
     }
 
-    $points = mycred_get_users_balance($user->ID);
+    $points = mycred_get_users_balance($customer_wp->ID);
 
-    wp_send_json_success(
-        array(
-            'points'       => $points,
-            'last_service' => $last_service ?: '—'
+    // Resolve the currently logged-in vendor's Amelia provider id.
+    // "Last Service" must be scoped to this vendor only.
+    $current_wp_user_id = get_current_user_id();
+
+    $users_tbl       = $wpdb->prefix . 'amelia_users';
+    $appointment_tbl = $wpdb->prefix . 'amelia_appointments';
+    $bookings_tbl    = $wpdb->prefix . 'amelia_customer_bookings';
+    $service_tbl     = $wpdb->prefix . 'amelia_services';
+
+    $provider_id = (int) $wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT id FROM {$users_tbl} WHERE externalId = %d AND type = 'provider' LIMIT 1",
+            $current_wp_user_id
         )
     );
+
+    $customer_amelia_id = (int) $wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT id FROM {$users_tbl} WHERE externalId = %d AND type = 'customer' LIMIT 1",
+            $customer_wp->ID
+        )
+    );
+
+    $response = array(
+        'points'          => $points,
+        'last_service'    => 'First time customer',
+        'service_date'    => null,
+        'last_invoice'    => null,
+        'total_completed' => 0,
+    );
+
+    // If we can't resolve the vendor (e.g. admin viewing) or the customer's
+    // amelia record, fall back to the "first time" response.
+    if ($provider_id <= 0 || $customer_amelia_id <= 0) {
+        wp_send_json_success($response);
+    }
+
+    // Latest approved appointment this customer had WITH THIS VENDOR
+    $row = $wpdb->get_row(
+        $wpdb->prepare(
+            "SELECT a.id AS appointment_id,
+                    a.bookingStart,
+                    s.name AS service_name,
+                    b.customFields
+             FROM {$appointment_tbl} a
+             JOIN {$bookings_tbl} b ON b.appointmentId = a.id
+             LEFT JOIN {$service_tbl} s ON s.id = a.serviceId
+             WHERE a.providerId = %d
+               AND b.customerId = %d
+               AND LOWER(a.status) = 'approved'
+             ORDER BY a.bookingStart DESC
+             LIMIT 1",
+            $provider_id,
+            $customer_amelia_id
+        )
+    );
+
+    if (! $row) {
+        wp_send_json_success($response);
+    }
+
+    // Parse invoice amount from the booking customFields
+    $invoice_amount = null;
+    if (! empty($row->customFields)) {
+        $fields = json_decode($row->customFields, true);
+        if (is_array($fields)) {
+            foreach ($fields as $field) {
+                if (is_array($field) && isset($field['label']) && stripos($field['label'], 'invoice') !== false) {
+                    $invoice_amount = floatval($field['value'] ?? 0);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Total completed approved appointments with THIS vendor
+    $total_completed = (int) $wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT COUNT(*)
+             FROM {$appointment_tbl} a
+             JOIN {$bookings_tbl} b ON b.appointmentId = a.id
+             WHERE a.providerId = %d
+               AND b.customerId = %d
+               AND LOWER(a.status) = 'approved'",
+            $provider_id,
+            $customer_amelia_id
+        )
+    );
+
+    $response['last_service']    = $row->service_name ?: '—';
+    $response['service_date']    = $row->bookingStart ? wp_date('M j, Y', strtotime($row->bookingStart)) : null;
+    $response['last_invoice']    = $invoice_amount !== null ? number_format($invoice_amount, 2) : null;
+    $response['total_completed'] = $total_completed;
+
+    wp_send_json_success($response);
 }
 
 add_action('wp_ajax_get_mycred_points', 'get_customer_mycred_points');
@@ -665,6 +700,16 @@ function nationclub_mycred_add_vendor_column_for_customers()
 
     add_filter('mycred_log_column_headers', 'custom_mycred_add_vendor_column_header');
     add_filter('mycred_log_vendor-name', 'custom_mycred_add_vendor_column_content', 10, 2);
+
+    // Customers don't need internal ledger references — hide them
+    add_filter('mycred_log_column_headers', 'nc_hide_internal_columns_for_customers', 20);
+}
+
+function nc_hide_internal_columns_for_customers($columns)
+{
+    unset($columns['points-origin-vendor']);
+    unset($columns['transaction-id']);
+    return $columns;
 }
 
 function custom_mycred_add_vendor_column_header($columns)
@@ -740,7 +785,7 @@ function nationclub_mycred_username_column_content($content, $entry)
     }
 
     /**
-     * 1️⃣ Amelia-based transactions (booking_reward, vendor_deduct, etc.)
+     * 1️⃣ Amelia-based transactions (booking_reward, earn_liability, redeem_accept, redeem_liability, etc.)
      * Uses customer_id → amelia_users.externalId → wp_users.ID
      */
     if (is_array($data) && ! empty($data['customer_id'])) {
@@ -779,15 +824,12 @@ function nationclub_mycred_username_column_content($content, $entry)
     return 'N/A';
 }
 
-
-
-
 // Add Custom Columns to myCRED Log Export
 add_filter('mycred_log_column_headers', 'custom_mycred_add_export_columns');
 function custom_mycred_add_export_columns($columns)
 {
-    $columns['category'] = 'Category';
-    $columns['points-origin-vendor'] = 'Points Origin Vendor';
+    $columns['category'] = 'Service';
+    $columns['points-origin-vendor'] = 'Vendor';
     $columns['transaction-id'] = 'Transaction ID';
     return $columns;
 }
@@ -960,8 +1002,8 @@ function export_mycred_log_to_csv()
         'Date',
         'Points',
         'Entry',
-        'Category',
-        'Points Origin Vendor',
+        'Service',
+        'Vendor',
         'Transaction ID'
     ]);
     foreach ($log_entries as $entry) {

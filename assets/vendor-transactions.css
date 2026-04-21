@@ -1,0 +1,24 @@
+.nc-vendor-history{padding:1rem 0;overflow-x:auto;}
+.nc-vendor-history__table{width:100%;border-collapse:collapse;font-size:14px;}
+.nc-vendor-history__table thead{background:#8b1a3b;color:#fff;}
+.nc-vendor-history__table th,
+.nc-vendor-history__table td{padding:14px 12px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle;}
+.nc-vendor-history__table tbody tr:nth-child(odd){background:#f8f8f8;}
+.nc-net{font-weight:700;text-align:center;white-space:nowrap;}
+.nc-net--pos{color:#1a8d2e;}
+.nc-net--neg{color:#c62828;}
+.nc-txn-view{color:#8b1a3b;text-decoration:underline;cursor:pointer;}
+.nc-txn-view:hover{color:#6b1029;}
+.nc-txn-breakdown-row > td{background:#faf4f6 !important;padding:18px 24px;}
+.nc-txn-breakdown{font-family:monospace;font-size:13px;line-height:1.8;max-width:520px;}
+.nc-txn-line{display:flex;justify-content:space-between;}
+.nc-txn-line span:last-child{font-weight:700;}
+.nc-txn-divider{border:0;border-top:1px dashed #999;margin:8px 0;}
+.nc-txn-net span{font-weight:800 !important;}
+.nc-txn-loading{color:#888;font-style:italic;}
+.nc-txn-error{color:#c62828;}
+.nc-vendor-history__pagination{margin:20px 0 0 0;}
+.nc-vendor-history__pagination ul{display:flex;gap:6px;list-style:none;padding:0;margin:0;justify-content:center;}
+.nc-vendor-history__pagination a,
+.nc-vendor-history__pagination span{display:inline-block;padding:8px 14px;border:1px solid #ddd;border-radius:4px;text-decoration:none;background:#fff;color:#333;}
+.nc-vendor-history__pagination .current{background:#8b1a3b;color:#fff;border-color:#8b1a3b;}
