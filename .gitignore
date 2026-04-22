@@ -1,0 +1,38 @@
+# Composer dependencies — install on deploy via `composer install --no-dev`
+/vendor/
+
+# Composer local cache (composer.lock should be committed)
+composer.phar
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE / editor
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+debug.log
+error_log
+
+# Environment / secrets
+.env
+.env.local
+
+# Node (in case any frontend tooling shows up later)
+node_modules/
+
+# WordPress generated / temp
+*.pot
+wp-content/uploads/nc-statements-tmp/
+
+# Build artifacts
+*.zip
+build/
+dist/

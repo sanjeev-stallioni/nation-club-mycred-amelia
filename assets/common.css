@@ -1,0 +1,372 @@
+/* ============================================================
+ * Nation Club — Shared UI primitives
+ * Used by: vendor-topup, vendor-withdrawal (and future modules)
+ * Brand color: #8b1c3b (deep maroon)
+ * ============================================================ */
+
+/* -------- Box container (card w/ gradient header) -------- */
+.nc-box {
+    margin: 32px auto;
+    padding: 0;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    color: #2c2c2c;
+}
+
+.nc-box__header {
+    background: linear-gradient(135deg, #8b1c3b 0%, #6f1530 100%);
+    color: #fff;
+    padding: 28px 32px;
+}
+
+.nc-box__header h2 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: #fff;
+}
+
+.nc-box__subtitle {
+    margin: 0;
+    font-size: 14px;
+    opacity: 0.85;
+}
+
+.nc-box__body {
+    padding: 28px 32px;
+}
+
+/* -------- Typography -------- */
+.nc-section-title {
+    margin: 32px 0 14px;
+    font-size: 16px;
+    font-weight: 700;
+    color: #333;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #f0f0f0;
+}
+
+.nc-hint {
+    color: #666;
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 6px 0 0;
+}
+
+.nc-hint-banner {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 24px;
+    font-size: 13px;
+    color: #78350f;
+    line-height: 1.5;
+}
+
+.nc-hint-banner__icon {
+    flex-shrink: 0;
+    font-size: 16px;
+    line-height: 1.2;
+}
+
+/* -------- Forms -------- */
+.nc-field {
+    margin-bottom: 18px;
+}
+
+.nc-field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 8px;
+    font-size: 14px;
+    color: #333;
+}
+
+.nc-field label .nc-required,
+.nc-required {
+    color: #d32f2f;
+    margin-left: 2px;
+}
+
+.nc-field input[type="number"],
+.nc-field input[type="date"],
+.nc-field input[type="text"],
+.nc-field input[type="search"],
+.nc-field input[type="email"],
+.nc-field textarea {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1.5px solid #e0e0e0;
+    border-radius: 8px;
+    box-sizing: border-box;
+    font-size: 15px;
+    font-family: inherit;
+    color: #2c2c2c;
+    background: #fff;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nc-field input:focus,
+.nc-field textarea:focus {
+    outline: 0;
+    border-color: #8b1c3b;
+    box-shadow: 0 0 0 3px rgba(139, 28, 59, 0.1);
+}
+
+.nc-field input::placeholder,
+.nc-field textarea::placeholder {
+    color: #aaa;
+}
+
+.nc-field textarea {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.nc-form-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-top: 22px;
+    flex-wrap: wrap;
+}
+
+/* -------- Buttons -------- */
+.nc-btn {
+    display: inline-block;
+    border: 0;
+    padding: 13px 26px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14.5px;
+    letter-spacing: 0.01em;
+    font-family: inherit;
+    transition: transform 0.1s ease, box-shadow 0.15s ease, opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    line-height: 1.2;
+}
+
+.nc-btn--primary {
+    background: linear-gradient(135deg, #8b1c3b 0%, #6f1530 100%);
+    color: #fff;
+    box-shadow: 0 2px 6px rgba(139, 28, 59, 0.25);
+}
+
+.nc-btn--primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(139, 28, 59, 0.35);
+    color: #fff;
+}
+
+.nc-btn--primary:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(139, 28, 59, 0.25);
+}
+
+.nc-btn--primary:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    background: #999;
+    box-shadow: none;
+}
+
+.nc-btn--secondary {
+    background: #fff;
+    color: #555;
+    border: 1.5px solid #ddd;
+    padding: 11px 22px;
+}
+
+.nc-btn--secondary:hover {
+    background: #fafafa;
+    border-color: #ccc;
+}
+
+.nc-btn--block {
+    width: 100%;
+    padding: 14px 24px;
+    font-size: 15.5px;
+    margin-top: 8px;
+}
+
+/* -------- Notices -------- */
+.nc-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 14px 18px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    font-size: 14px;
+    line-height: 1.5;
+    border: 1px solid transparent;
+}
+
+.nc-notice::before {
+    flex-shrink: 0;
+    font-weight: 700;
+    font-size: 15px;
+    line-height: 1.4;
+}
+
+.nc-notice--ok   { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+.nc-notice--err  { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.nc-notice--info { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+
+.nc-notice--ok::before   { content: "✓"; }
+.nc-notice--err::before  { content: "!"; }
+.nc-notice--info::before { content: "i"; }
+
+/* -------- Status pills -------- */
+.nc-status {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: capitalize;
+    letter-spacing: 0.02em;
+    border: 1px solid transparent;
+}
+
+.nc-status--pending   { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+.nc-status--approved  { background: #dbeafe; color: #1e3a8a; border-color: #bfdbfe; }
+.nc-status--completed { background: #d1fae5; color: #065f46; border-color: #a7f3d0; }
+.nc-status--rejected  { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+
+/* -------- Tables -------- */
+.nc-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin: 0 -4px;
+    padding: 0 4px;
+}
+
+.nc-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.nc-table th,
+.nc-table td {
+    text-align: left;
+    padding: 12px 10px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.nc-table th {
+    background: #fafafa;
+    color: #555;
+    font-weight: 600;
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.nc-table tr:hover td {
+    background: #fafbfc;
+}
+
+.nc-table td.nc-amount {
+    font-weight: 600;
+    color: #333;
+}
+
+/* -------- Pagination -------- */
+.nc-pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    margin-top: 18px;
+    flex-wrap: wrap;
+}
+
+.nc-pagination .page-numbers {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    color: #555;
+    text-decoration: none;
+    font-size: 13.5px;
+    font-weight: 500;
+    background: #fff;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.nc-pagination .page-numbers:hover {
+    background: #faf5f7;
+    border-color: #8b1c3b;
+    color: #8b1c3b;
+}
+
+.nc-pagination .page-numbers.current {
+    background: #8b1c3b;
+    color: #fff;
+    border-color: #8b1c3b;
+}
+
+.nc-pagination .page-numbers.dots {
+    border-color: transparent;
+    background: transparent;
+    cursor: default;
+}
+
+.nc-pagination .page-numbers.dots:hover {
+    background: transparent;
+    color: #555;
+}
+
+/* -------- Net amount indicators (used by txn breakdown too) -------- */
+.nc-net { font-weight: 700; white-space: nowrap; }
+.nc-net--pos { color: #1a8d2e; }
+.nc-net--neg { color: #c62828; }
+
+/* -------- Empty state -------- */
+.nc-empty {
+    text-align: center;
+    padding: 32px 20px;
+    background: #fafafa;
+    border-radius: 8px;
+    color: #777;
+    font-size: 14px;
+}
+
+/* -------- Shared box responsive -------- */
+@media (max-width: 600px) {
+    .nc-box {
+        margin: 16px;
+        border-radius: 10px;
+    }
+    .nc-box__header,
+    .nc-box__body {
+        padding: 20px;
+    }
+    .nc-form-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .nc-table {
+        font-size: 13px;
+    }
+    .nc-table th,
+    .nc-table td {
+        padding: 10px 8px;
+        white-space: nowrap;
+    }
+}

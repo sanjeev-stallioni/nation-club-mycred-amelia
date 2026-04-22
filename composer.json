@@ -1,0 +1,9 @@
+{
+    "name": "stallioni/nation-club-mycred-amelia",
+    "description": "Nation Club myCRED Amelia integration plugin",
+    "type": "wordpress-plugin",
+    "require": {
+        "php": ">=7.4",
+        "dompdf/dompdf": "^3.0"
+    }
+}

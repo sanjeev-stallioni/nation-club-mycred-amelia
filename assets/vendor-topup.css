@@ -1,0 +1,119 @@
+/* ============================================================
+ * Nation Club — Vendor Top-Up (module-specific)
+ * Shared primitives live in common.css
+ * ============================================================ */
+
+/* -------- Balance card -------- */
+.nc-topup-balance {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: linear-gradient(135deg, #faf5f7 0%, #f4ebef 100%);
+    border: 1px solid #ecd9e0;
+    padding: 18px 22px;
+    border-radius: 10px;
+    margin-bottom: 24px;
+}
+
+.nc-topup-balance__label {
+    font-size: 13px;
+    color: #8b1c3b;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.nc-topup-balance__value {
+    font-size: 26px;
+    font-weight: 700;
+    color: #2c2c2c;
+    letter-spacing: -0.01em;
+}
+
+.nc-topup-balance__sub {
+    font-size: 13px;
+    color: #777;
+    margin-top: 2px;
+}
+
+/* -------- File upload dropzone -------- */
+.nc-topup-file {
+    position: relative;
+    border: 2px dashed #d6d6d6;
+    border-radius: 8px;
+    padding: 20px;
+    background: #fafafa;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    cursor: pointer;
+}
+
+.nc-topup-file:hover {
+    border-color: #8b1c3b;
+    background: #faf5f7;
+}
+
+.nc-topup-file input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.nc-topup-file__inner {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    pointer-events: none;
+}
+
+.nc-topup-file__icon {
+    width: 40px;
+    height: 40px;
+    background: #fff;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8b1c3b;
+    font-size: 20px;
+    flex-shrink: 0;
+    border: 1px solid #ecd9e0;
+}
+
+.nc-topup-file__text { flex: 1; }
+
+.nc-topup-file__primary {
+    font-weight: 600;
+    color: #333;
+    font-size: 14px;
+}
+
+.nc-topup-file__secondary {
+    font-size: 12.5px;
+    color: #777;
+    margin-top: 2px;
+}
+
+.nc-topup-file.is-selected {
+    border-style: solid;
+    border-color: #4caf50;
+    background: #f0faf0;
+}
+
+.nc-topup-file.is-selected .nc-topup-file__icon {
+    background: #4caf50;
+    color: #fff;
+    border-color: #4caf50;
+}
+
+/* -------- Responsive -------- */
+@media (max-width: 600px) {
+    .nc-topup-balance {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+    }
+    .nc-table {
+        min-width: 520px;
+    }
+}

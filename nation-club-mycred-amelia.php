@@ -16,6 +16,11 @@ if (!defined('ABSPATH')) {
 define('NC_MYCRE_AMELIA_PATH', plugin_dir_path(__FILE__));
 define('NC_MYCRE_AMELIA_URL', plugin_dir_url(__FILE__));
 
+// Composer autoloader (dompdf and other vendor libs)
+if ( file_exists( NC_MYCRE_AMELIA_PATH . 'vendor/autoload.php' ) ) {
+    require_once NC_MYCRE_AMELIA_PATH . 'vendor/autoload.php';
+}
+
 
 add_action( 'amelia_after_appointment_status_updated', function( $appointment, $status ) {
 
@@ -48,6 +53,8 @@ require_once NC_MYCRE_AMELIA_PATH . 'includes/nc_log.php';
 // require_once NC_MYCRE_AMELIA_PATH . 'includes/admin.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/mycred-hooks.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-transactions.php';
+require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-pool.php';
+require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-statements.php';
 
 
 

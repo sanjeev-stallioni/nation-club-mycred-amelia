@@ -1,0 +1,71 @@
+/* ============================================================
+ * Nation Club — Vendor Withdrawal (module-specific)
+ * Shared primitives live in common.css
+ * ============================================================ */
+
+/* -------- Summary cards grid -------- */
+.nc-wd-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 28px;
+}
+
+.nc-wd-card {
+    background: #fafafa;
+    padding: 18px 20px;
+    border-radius: 10px;
+    border: 1px solid #eee;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nc-wd-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+.nc-wd-card .lbl {
+    font-size: 12px;
+    color: #777;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.nc-wd-card .val {
+    font-size: 26px;
+    font-weight: 700;
+    color: #2c2c2c;
+    margin-top: 6px;
+    letter-spacing: -0.02em;
+}
+
+.nc-wd-card .sub {
+    font-size: 12px;
+    color: #999;
+    margin-top: 2px;
+}
+
+.nc-wd-card--surplus {
+    background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+    border-color: #a7f3d0;
+}
+
+.nc-wd-card--surplus .lbl { color: #047857; }
+
+.nc-wd-card--deficit {
+    background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+    border-color: #fecaca;
+}
+
+.nc-wd-card--deficit .lbl { color: #b91c1c; }
+
+/* -------- Responsive -------- */
+@media (max-width: 700px) {
+    .nc-wd-summary {
+        grid-template-columns: 1fr;
+    }
+    .nc-table {
+        min-width: 620px;
+    }
+}

@@ -906,6 +906,16 @@ function custom_mycred_transaction_id_column_content($content, $entry)
             return $data['transaction_id'];
         }
 
+        // For vendor pool top-ups
+        if (!empty($data['topup_id'])) {
+            return $data['topup_id'];
+        }
+
+        // For vendor pool withdrawals
+        if (!empty($data['withdrawal_id'])) {
+            return $data['withdrawal_id'];
+        }
+
         // For buy_creds_with_stripe
         // if (!empty($data['txn_id'])) {
         //     return $data['txn_id'];
