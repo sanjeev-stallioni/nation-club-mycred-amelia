@@ -18,6 +18,19 @@ function nc_expiry_debug($msg) {
     @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
 }
 
+/**
+ * Dedicated log for the monthly statement auto-generation cron.
+ * Writes to wp-content/uploads/nc-statement-cron.log
+ */
+function nc_statement_cron_log($msg) {
+    if (!function_exists('wp_upload_dir')) return;
+    $upload = wp_upload_dir();
+    if (empty($upload['basedir'])) return;
+    $file = trailingslashit($upload['basedir']) . 'nc-statement-cron.log';
+    $line = '[' . date('Y-m-d H:i:s') . '] ' . $msg . PHP_EOL;
+    @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
+}
+
 add_shortcode( 'wp_now', function () {
     return '<pre>Simulated Time: ' . esc_html(
         wp_date( 'Y-m-d H:i:s' )

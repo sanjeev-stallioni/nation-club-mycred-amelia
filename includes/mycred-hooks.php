@@ -277,30 +277,29 @@ function mycred_process_appointment($appointment, $trigger)
                     $appointmentId,
                     $customer_redeem_log_data
                 );
+                if (function_exists('nc_vendor_check_low_balance')) {
+                    nc_vendor_check_low_balance((int) $vendor_wp_user_id);
+                }
                 $wlog("↩️ Credited {$redeem_amount} pts to service vendor {$vendor_wp_user_id} (redeem_accept).");
             }
 
-            // Liability vendor: pool debited for the old points the customer is redeeming
+            // Origin vendor: NOT debited again at redeem time.
+            // The origin vendor's pool was already drained when the customer earned
+            // these points (earn_liability). Debiting again here would double-count
+            // the same liability.
+            //
+            // Net flow across vendors after this change:
+            //   Earn:   origin vendor -X (earn_liability)        — funds the loyalty
+            //   Redeem: receiving vendor +X (redeem_accept)      — collects the value
+            //   Total vendor pool change: 0 ✓
+            //
+            // Historical redeem_liability entries (created before this change) remain
+            // intact in the log and on past statements — they reflect what actually
+            // happened to those vendor balances at the time.
             if ($origin_vendor_id > 0) {
-                $liability_vendor_wp_id = intval($wpdb->get_var($wpdb->prepare(
-                    "SELECT externalId FROM {$amelia_users_tbl} WHERE id = %d",
-                    $origin_vendor_id
-                )));
-                if ($liability_vendor_wp_id > 0) {
-                    mycred_add(
-                        'redeem_liability',
-                        $liability_vendor_wp_id,
-                        -$redeem_amount,
-                        "{$service_name} – Settled " . number_format($redeem_amount, 2) . " points redeemed by customer",
-                        $appointmentId,
-                        $customer_redeem_log_data
-                    );
-                    $wlog("⬇️ Debited {$redeem_amount} pts from liability vendor {$liability_vendor_wp_id} (redeem_liability, origin_amelia_id={$origin_vendor_id}).");
-                } else {
-                    $wlog("⚠️ Liability vendor amelia_id={$origin_vendor_id} has no wp_user mapping — skipped redeem_liability.");
-                }
+                $wlog("ℹ️ Origin vendor amelia_id={$origin_vendor_id}: no debit applied — already paid via earn_liability when customer earned these pts.");
             } else {
-                $wlog("⚠️ No origin_vendor_id for appt {$appointmentId} — skipped redeem_liability (points may be from manual grant).");
+                $wlog("ℹ️ No origin_vendor_id for appt {$appointmentId} — pts may be from manual grant; no settlement debit applied.");
             }
 
             update_user_meta($wp_user_id, 'mycred_redeemed_appt_' . $appointmentId, 1);
@@ -366,6 +365,9 @@ function mycred_process_appointment($appointment, $trigger)
                         $appointmentId,
                         $customer_log_data
                     );
+                    if (function_exists('nc_vendor_check_low_balance')) {
+                        nc_vendor_check_low_balance((int) $vendor_wp_user_id);
+                    }
                     $wlog("⬇️ Deducted {$points} pts from service vendor {$vendor_wp_user_id} (earn_liability).");
                 }
             } else {

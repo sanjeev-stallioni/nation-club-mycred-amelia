@@ -125,6 +125,74 @@ function nc_vendor_is_provider( $user_id ) {
     return in_array( 'wpamelia-provider', (array) $user->roles, true );
 }
 
+/**
+ * Configured low-balance alert threshold in SGD (0 disables alerts).
+ * Default 300. Capped at 100,000 to avoid runaway settings UI input.
+ */
+function nc_get_low_balance_threshold() {
+    $val = (int) get_option( 'nc_low_balance_threshold', 300 );
+    return max( 0, min( 100000, $val ) );
+}
+
+/**
+ * Event-based low-balance alert. Call after any vendor balance change
+ * (every vendor mycred_add site).
+ *
+ * Behavior — once-per-cross-down:
+ *   - Below threshold AND not yet alerted → send email, set flag
+ *   - Above threshold AND flag set       → clear flag (next dip can re-trigger)
+ *   - Otherwise → no-op
+ *
+ * The user_meta flag `nc_low_balance_alerted` is the cross-state memory.
+ */
+function nc_vendor_check_low_balance( $vendor_id ) {
+    $vendor_id = (int) $vendor_id;
+    if ( $vendor_id <= 0 ) { return; }
+    if ( ! function_exists( 'mycred_get_users_balance' ) ) { return; }
+    if ( ! function_exists( 'nc_email_send' ) ) { return; }
+
+    $threshold = nc_get_low_balance_threshold();
+    if ( $threshold <= 0 ) { return; }
+
+    $balance = (float) mycred_get_users_balance( $vendor_id );
+    $alerted = (int) get_user_meta( $vendor_id, 'nc_low_balance_alerted', true );
+
+    if ( $balance < $threshold ) {
+        if ( $alerted ) { return; }
+
+        $user = get_userdata( $vendor_id );
+        if ( ! $user || empty( $user->user_email ) ) {
+            if ( function_exists( 'nc_debug' ) ) {
+                nc_debug( "low_balance: vendor #{$vendor_id} balance " . number_format( $balance, 2 ) . " below {$threshold} but no email on file" );
+            }
+            return;
+        }
+
+        $minimum = (float) NC_VENDOR_POOL_MIN_BALANCE;
+        $tokens  = array(
+            '{vendor_name}'     => $user->display_name ?: $user->user_login,
+            '{current_balance}' => number_format( $balance, 2 ),
+            '{threshold}'       => number_format( (float) $threshold, 2 ),
+            '{minimum_balance}' => number_format( $minimum, 2 ),
+            '{shortfall}'       => number_format( max( 0, $minimum - $balance ), 2 ),
+            '{site_name}'       => get_bloginfo( 'name' ),
+        );
+
+        $sent = nc_email_send( 'vendor_low_balance', $user->user_email, $tokens );
+        update_user_meta( $vendor_id, 'nc_low_balance_alerted', 1 );
+
+        if ( function_exists( 'nc_debug' ) ) {
+            $tag = $sent ? 'SENT' : 'FAILED';
+            nc_debug( "low_balance: {$tag} alert to {$user->user_email} (vendor #{$vendor_id}, balance " . number_format( $balance, 2 ) . " < {$threshold})" );
+        }
+    } elseif ( $alerted ) {
+        delete_user_meta( $vendor_id, 'nc_low_balance_alerted' );
+        if ( function_exists( 'nc_debug' ) ) {
+            nc_debug( "low_balance: vendor #{$vendor_id} recovered to " . number_format( $balance, 2 ) . " ≥ {$threshold} — flag cleared" );
+        }
+    }
+}
+
 function nc_vendor_generate_topup_id( $row_id ) {
     return 'TU-' . str_pad( (string) $row_id, 5, '0', STR_PAD_LEFT );
 }
@@ -297,7 +365,7 @@ function nc_vendor_topup_form_render( $vendor_id ) {
                     <div class="nc-topup-balance__label">Current Pool Balance</div>
                     <div class="nc-topup-balance__sub">SGD <?php echo esc_html( number_format( $balance, 2 ) ); ?></div>
                 </div>
-                <div class="nc-topup-balance__value"><?php echo esc_html( number_format( $balance, 2 ) ); ?></div>
+                <div class="nc-topup-balance__value"><?php echo esc_html( number_format( $balance, 2 ) ); ?><span class="nc-pts">pts</span></div>
             </div>
 
             <div class="nc-hint-banner">
@@ -491,6 +559,25 @@ function nc_vendor_handle_topup_submission() {
         'created_at'     => current_time( 'mysql' ),
     ), array( '%d', '%f', '%s', '%s', '%d', '%s', '%s', '%s' ) );
 
+    $request_id = (int) $wpdb->insert_id;
+
+    // Notify admin of the new top-up submission
+    if ( function_exists( 'nc_email_send' ) && function_exists( 'nc_get_admin_notify_recipients' ) ) {
+        $vendor   = get_userdata( $vendor_id );
+        $recip    = nc_get_admin_notify_recipients();
+        $tokens   = array(
+            '{vendor_name}'    => $vendor ? ( $vendor->display_name ?: $vendor->user_login ) : ( 'Vendor #' . $vendor_id ),
+            '{vendor_email}'   => $vendor ? $vendor->user_email : '',
+            '{amount}'         => number_format( (float) $amount, 2 ),
+            '{transfer_date}'  => $transfer_date ?: '—',
+            '{wise_reference}' => $wise_ref ?: '—',
+            '{request_id}'     => (string) $request_id,
+            '{site_name}'      => get_bloginfo( 'name' ),
+            '{admin_url}'      => admin_url( 'admin.php?page=nation-club' ),
+        );
+        nc_email_send( 'topup_submitted', $recip['to'], $tokens, $recip['cc'] );
+    }
+
     wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'success' ), $redirect ) );
     exit;
 }
@@ -628,28 +715,42 @@ function nc_vendor_withdrawal_render( $vendor_id ) {
             <div class="nc-wd-summary">
                 <div class="nc-wd-card">
                     <div class="lbl">Current Balance</div>
-                    <div class="val"><?php echo esc_html( number_format( $balance, 2 ) ); ?></div>
+                    <div class="val"><?php echo esc_html( number_format( $balance, 2 ) ); ?><span class="nc-pts">pts</span></div>
                     <div class="sub">SGD <?php echo esc_html( number_format( $balance, 2 ) ); ?></div>
                 </div>
                 <div class="nc-wd-card">
                     <div class="lbl">Required Minimum</div>
-                    <div class="val"><?php echo esc_html( number_format( NC_VENDOR_POOL_MIN_BALANCE, 2 ) ); ?></div>
+                    <div class="val"><?php echo esc_html( number_format( NC_VENDOR_POOL_MIN_BALANCE, 2 ) ); ?><span class="nc-pts">pts</span></div>
                     <div class="sub">Maintained at all times</div>
                 </div>
                 <?php if ( $deficit > 0 ) : ?>
                     <div class="nc-wd-card nc-wd-card--deficit">
                         <div class="lbl">Top-up Required</div>
-                        <div class="val"><?php echo esc_html( number_format( $deficit, 2 ) ); ?></div>
+                        <div class="val"><?php echo esc_html( number_format( $deficit, 2 ) ); ?><span class="nc-pts">pts</span></div>
                         <div class="sub">to restore minimum</div>
                     </div>
                 <?php else : ?>
                     <div class="nc-wd-card <?php echo $surplus > 0 ? 'nc-wd-card--surplus' : ''; ?>">
                         <div class="lbl">Surplus</div>
-                        <div class="val"><?php echo esc_html( number_format( $surplus, 2 ) ); ?></div>
+                        <div class="val"><?php echo esc_html( number_format( $surplus, 2 ) ); ?><span class="nc-pts">pts</span></div>
                         <div class="sub"><?php echo $surplus > 0 ? 'available to withdraw' : 'no surplus yet'; ?></div>
                     </div>
                 <?php endif; ?>
             </div>
+
+            <?php
+            // Withdrawal window status (2nd-5th of each month)
+            if ( function_exists( 'nc_statement_next_withdrawal_window' ) ) :
+                $window = nc_statement_next_withdrawal_window();
+                ?>
+                <div class="nc-notice <?php echo $window['is_open'] ? 'nc-notice--ok' : 'nc-notice--info'; ?>">
+                    <?php if ( $window['is_open'] ) : ?>
+                        <strong>Withdrawal window is OPEN</strong> — submissions accepted until <?php echo esc_html( wp_date( 'M j, Y', $window['end_ts'] ) ); ?>.
+                    <?php else : ?>
+                        <strong>Withdrawal window is closed.</strong> Next window: <?php echo esc_html( $window['label_short'] ); ?>.
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
 
             <?php if ( $has_pending ) : ?>
                 <div class="nc-notice nc-notice--info">
@@ -659,6 +760,12 @@ function nc_vendor_withdrawal_render( $vendor_id ) {
                 <div class="nc-empty">
                     No surplus to withdraw. Withdrawals are available once your balance exceeds
                     <strong><?php echo esc_html( number_format( NC_VENDOR_POOL_MIN_BALANCE, 2 ) ); ?></strong>.
+                </div>
+            <?php elseif ( ! empty( $window ) && ! $window['is_open'] ) : ?>
+                <div class="nc-empty">
+                    The withdrawal request form will reopen on
+                    <strong><?php echo esc_html( wp_date( 'M j, Y', $window['start_ts'] ) ); ?></strong>.
+                    Surplus carries forward — nothing expires while you wait.
                 </div>
             <?php else : ?>
                 <h3 class="nc-section-title">Request Withdrawal</h3>
@@ -783,6 +890,24 @@ function nc_vendor_handle_withdrawal_submission() {
         'status'          => 'pending',
         'request_date'    => current_time( 'mysql' ),
     ), array( '%d', '%f', '%s', '%s', '%s', '%s' ) );
+
+    $request_id = (int) $wpdb->insert_id;
+
+    // Notify admin of new withdrawal request
+    if ( function_exists( 'nc_email_send' ) && function_exists( 'nc_get_admin_notify_recipients' ) ) {
+        $vendor = get_userdata( $vendor_id );
+        $recip  = nc_get_admin_notify_recipients();
+        $tokens = array(
+            '{vendor_name}'  => $vendor ? ( $vendor->display_name ?: $vendor->user_login ) : ( 'Vendor #' . $vendor_id ),
+            '{vendor_email}' => $vendor ? $vendor->user_email : '',
+            '{amount}'       => number_format( (float) $amount, 2 ),
+            '{vendor_note}'  => $vendor_note ?: '—',
+            '{request_id}'   => (string) $request_id,
+            '{site_name}'    => get_bloginfo( 'name' ),
+            '{admin_url}'    => admin_url( 'admin.php?page=nc-withdrawals' ),
+        );
+        nc_email_send( 'withdrawal_submitted', $recip['to'], $tokens, $recip['cc'] );
+    }
 
     wp_safe_redirect( add_query_arg( array( 'nc_wd' => 'success' ), $redirect ) );
     exit;
@@ -947,9 +1072,25 @@ function nc_admin_topup_page() {
         </form>
         <div style="clear:both"></div>
 
+        <!-- Bulk actions form (table checkboxes reference this via form="..." attribute) -->
+        <form method="post" id="nc-topup-bulk-form" style="margin-top:10px;background:#fff;padding:10px 14px;border:1px solid #ccd0d4;border-radius:4px">
+            <?php wp_nonce_field( 'nc_topup_bulk' ); ?>
+            <input type="hidden" name="nc_topup_action" value="bulk">
+            <select name="bulk_action">
+                <option value="">— Bulk action —</option>
+                <option value="approve">Approve &amp; Credit</option>
+                <option value="reject">Reject (note required)</option>
+                <option value="delete">Delete permanently</option>
+            </select>
+            <input type="text" name="bulk_note" placeholder="Note / rejection reason" style="width:260px">
+            <button type="submit" class="button" onclick="return ncTopupBulkConfirm(this.form);">Apply to selected</button>
+            <span style="color:#666;margin-left:8px"><span id="nc-topup-selected-count">0</span> selected</span>
+        </form>
+
         <table class="wp-list-table widefat fixed striped" style="margin-top:10px">
             <thead>
                 <tr>
+                    <td class="manage-column column-cb check-column"><input type="checkbox" id="nc-topup-cb-all" form="nc-topup-bulk-form"></td>
                     <?php nc_admin_sortable_th( 'ID', 'id', $orderby, $order ); ?>
                     <th>Vendor</th>
                     <?php nc_admin_sortable_th( 'Amount', 'amount', $orderby, $order ); ?>
@@ -964,11 +1105,12 @@ function nc_admin_topup_page() {
             </thead>
             <tbody>
             <?php if ( empty( $rows ) ) : ?>
-                <tr><td colspan="10">No top-up requests.</td></tr>
+                <tr><td colspan="11">No top-up requests.</td></tr>
             <?php else : foreach ( $rows as $row ) :
                 $balance = nc_vendor_pool_balance( $row->vendor_id );
                 ?>
                 <tr>
+                    <th class="check-column"><input type="checkbox" name="ids[]" value="<?php echo esc_attr( $row->id ); ?>" form="nc-topup-bulk-form" class="nc-topup-cb"></th>
                     <td>#<?php echo esc_html( $row->id ); ?><?php if ( $row->topup_id ) echo '<br><small>' . esc_html( $row->topup_id ) . '</small>'; ?></td>
                     <td>
                         <strong><?php echo esc_html( $row->vendor_name ?: 'User #' . $row->vendor_id ); ?></strong><br>
@@ -1051,11 +1193,43 @@ function nc_admin_topup_page() {
             </div>
         <?php endif; ?>
     </div>
+    <script>
+    (function () {
+        var all = document.getElementById('nc-topup-cb-all');
+        var rows = document.querySelectorAll('input.nc-topup-cb');
+        var counter = document.getElementById('nc-topup-selected-count');
+        function recount() { counter.textContent = document.querySelectorAll('input.nc-topup-cb:checked').length; }
+        if (all) {
+            all.addEventListener('change', function () {
+                rows.forEach(function (cb) { cb.checked = all.checked; });
+                recount();
+            });
+        }
+        rows.forEach(function (cb) { cb.addEventListener('change', recount); });
+    })();
+    function ncTopupBulkConfirm(form) {
+        var action = form.bulk_action.value;
+        var checked = form.querySelectorAll ? 0 : 0;
+        var ids = document.querySelectorAll('input.nc-topup-cb:checked');
+        if (!action) { alert('Choose a bulk action.'); return false; }
+        if (ids.length === 0) { alert('Select at least one row.'); return false; }
+        if (action === 'reject' && !form.bulk_note.value.trim()) { alert('A reason is required for bulk rejection.'); return false; }
+        var label = action === 'approve' ? 'approve' : (action === 'reject' ? 'reject' : 'permanently delete');
+        return confirm('Are you sure you want to ' + label + ' ' + ids.length + ' top-up request(s)?');
+    }
+    </script>
     <?php
 }
 
 function nc_admin_topup_handle_action() {
-    $action     = sanitize_key( wp_unslash( $_POST['nc_topup_action'] ) );
+    $action = sanitize_key( wp_unslash( $_POST['nc_topup_action'] ) );
+
+    // Bulk path — different nonce, different inputs
+    if ( 'bulk' === $action ) {
+        nc_admin_topup_handle_bulk();
+        return;
+    }
+
     $request_id = isset( $_POST['request_id'] ) ? (int) $_POST['request_id'] : 0;
     check_admin_referer( 'nc_topup_action_' . $request_id );
 
@@ -1108,6 +1282,8 @@ function nc_admin_topup_handle_action() {
             exit;
         }
 
+        nc_vendor_check_low_balance( (int) $row->vendor_id );
+
         // Find the log id we just created
         $log_tbl = $wpdb->prefix . 'myCRED_log';
         $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
@@ -1127,6 +1303,22 @@ function nc_admin_topup_handle_action() {
             'reviewed_at'   => current_time( 'mysql' ),
         ), array( 'id' => $row->id ) );
 
+        // Notify vendor of approval
+        if ( function_exists( 'nc_email_send' ) ) {
+            $vendor = get_userdata( (int) $row->vendor_id );
+            if ( $vendor && $vendor->user_email ) {
+                $tokens = array(
+                    '{vendor_name}'     => $vendor->display_name ?: $vendor->user_login,
+                    '{amount}'          => number_format( (float) $row->amount, 2 ),
+                    '{topup_id}'        => $topup_id,
+                    '{current_balance}' => number_format( nc_vendor_pool_balance( (int) $row->vendor_id ), 2 ),
+                    '{admin_note}'      => $admin_note,
+                    '{site_name}'       => get_bloginfo( 'name' ),
+                );
+                nc_email_send( 'topup_approved', $vendor->user_email, $tokens );
+            }
+        }
+
         wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( $topup_id . ' approved and credited.' ), wp_get_referer() ) );
         exit;
     }
@@ -1143,9 +1335,137 @@ function nc_admin_topup_handle_action() {
             'reviewed_at' => current_time( 'mysql' ),
         ), array( 'id' => $row->id ) );
 
+        // Notify vendor of rejection
+        if ( function_exists( 'nc_email_send' ) ) {
+            $vendor = get_userdata( (int) $row->vendor_id );
+            if ( $vendor && $vendor->user_email ) {
+                $tokens = array(
+                    '{vendor_name}' => $vendor->display_name ?: $vendor->user_login,
+                    '{amount}'      => number_format( (float) $row->amount, 2 ),
+                    '{admin_note}'  => $admin_note,
+                    '{site_name}'   => get_bloginfo( 'name' ),
+                );
+                nc_email_send( 'topup_rejected', $vendor->user_email, $tokens );
+            }
+        }
+
         wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( 'Request rejected.' ), wp_get_referer() ) );
         exit;
     }
+}
+
+/**
+ * Bulk action handler for Top-up Requests.
+ * Supports: approve, reject, delete. Uses the same per-row logic as the
+ * single-row handler so emails and ledger entries flow through normally.
+ */
+function nc_admin_topup_handle_bulk() {
+    check_admin_referer( 'nc_topup_bulk' );
+
+    $bulk = isset( $_POST['bulk_action'] ) ? sanitize_key( $_POST['bulk_action'] ) : '';
+    $ids  = isset( $_POST['ids'] ) ? array_map( 'absint', (array) $_POST['ids'] ) : array();
+    $note = isset( $_POST['bulk_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['bulk_note'] ) ) : '';
+    $ids  = array_values( array_filter( array_unique( $ids ) ) );
+
+    if ( ! in_array( $bulk, array( 'approve', 'reject', 'delete' ), true ) || empty( $ids ) ) {
+        wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'No action or no rows selected.' ), wp_get_referer() ) );
+        exit;
+    }
+    if ( $bulk === 'reject' && $note === '' ) {
+        wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'Rejection reason is required.' ), wp_get_referer() ) );
+        exit;
+    }
+
+    global $wpdb;
+    $tables   = nc_vendor_pool_tables();
+    $admin_id = get_current_user_id();
+    $done     = 0;
+    $skipped  = 0;
+
+    foreach ( $ids as $id ) {
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$tables['topup']} WHERE id = %d", $id ) );
+        if ( ! $row ) { $skipped++; continue; }
+
+        if ( $bulk === 'delete' ) {
+            $wpdb->delete( $tables['topup'], array( 'id' => $row->id ) );
+            $done++;
+            continue;
+        }
+
+        if ( $row->status !== 'pending' ) { $skipped++; continue; }
+
+        if ( $bulk === 'approve' ) {
+            if ( ! function_exists( 'mycred_add' ) ) { $skipped++; continue; }
+            $topup_id = nc_vendor_generate_topup_id( $row->id );
+            $log_data = wp_json_encode( array(
+                'topup_request_id' => (int) $row->id,
+                'topup_id'         => $topup_id,
+                'wise_reference'   => $row->wise_reference,
+                'transfer_date'    => $row->transfer_date,
+                'attachment_id'    => (int) $row->attachment_id,
+                'approved_by'      => $admin_id,
+                'bulk'             => true,
+            ) );
+            $entry = sprintf( 'Vendor top-up %s — SGD %s', $topup_id, number_format( (float) $row->amount, 2 ) );
+            $ok    = mycred_add( 'vendor_topup', (int) $row->vendor_id, (float) $row->amount, $entry, $row->id, $log_data );
+            if ( ! $ok ) { $skipped++; continue; }
+            nc_vendor_check_low_balance( (int) $row->vendor_id );
+            $log_tbl = $wpdb->prefix . 'myCRED_log';
+            $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT id FROM {$log_tbl} WHERE user_id = %d AND ref = 'vendor_topup' AND ref_id = %d ORDER BY id DESC LIMIT 1",
+                (int) $row->vendor_id, (int) $row->id
+            ) );
+            $wpdb->update( $tables['topup'], array(
+                'status'        => 'approved',
+                'topup_id'      => $topup_id,
+                'mycred_log_id' => $log_id ?: null,
+                'admin_note'    => $note,
+                'reviewed_by'   => $admin_id,
+                'reviewed_at'   => current_time( 'mysql' ),
+            ), array( 'id' => $row->id ) );
+
+            if ( function_exists( 'nc_email_send' ) ) {
+                $vendor = get_userdata( (int) $row->vendor_id );
+                if ( $vendor && $vendor->user_email ) {
+                    nc_email_send( 'topup_approved', $vendor->user_email, array(
+                        '{vendor_name}'     => $vendor->display_name ?: $vendor->user_login,
+                        '{amount}'          => number_format( (float) $row->amount, 2 ),
+                        '{topup_id}'        => $topup_id,
+                        '{current_balance}' => number_format( nc_vendor_pool_balance( (int) $row->vendor_id ), 2 ),
+                        '{admin_note}'      => $note,
+                        '{site_name}'       => get_bloginfo( 'name' ),
+                    ) );
+                }
+            }
+            $done++;
+        }
+
+        if ( $bulk === 'reject' ) {
+            $wpdb->update( $tables['topup'], array(
+                'status'      => 'rejected',
+                'admin_note'  => $note,
+                'reviewed_by' => $admin_id,
+                'reviewed_at' => current_time( 'mysql' ),
+            ), array( 'id' => $row->id ) );
+
+            if ( function_exists( 'nc_email_send' ) ) {
+                $vendor = get_userdata( (int) $row->vendor_id );
+                if ( $vendor && $vendor->user_email ) {
+                    nc_email_send( 'topup_rejected', $vendor->user_email, array(
+                        '{vendor_name}' => $vendor->display_name ?: $vendor->user_login,
+                        '{amount}'      => number_format( (float) $row->amount, 2 ),
+                        '{admin_note}'  => $note,
+                        '{site_name}'   => get_bloginfo( 'name' ),
+                    ) );
+                }
+            }
+            $done++;
+        }
+    }
+
+    $msg = sprintf( 'Bulk %s: %d done, %d skipped (already processed or invalid).', $bulk, $done, $skipped );
+    wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( $msg ), wp_get_referer() ) );
+    exit;
 }
 
 /* -------------------------------------------------------------------------
@@ -1272,9 +1592,25 @@ function nc_admin_withdrawal_page() {
         </form>
         <div style="clear:both"></div>
 
+        <!-- Bulk actions form (table checkboxes reference this via form="..." attribute) -->
+        <form method="post" id="nc-wd-bulk-form" style="margin-top:10px;background:#fff;padding:10px 14px;border:1px solid #ccd0d4;border-radius:4px">
+            <?php wp_nonce_field( 'nc_wd_bulk' ); ?>
+            <input type="hidden" name="nc_wd_action" value="bulk">
+            <select name="bulk_action">
+                <option value="">— Bulk action —</option>
+                <option value="approve">Approve</option>
+                <option value="reject">Reject (note required)</option>
+                <option value="delete">Delete permanently</option>
+            </select>
+            <input type="text" name="bulk_note" placeholder="Note / rejection reason" style="width:260px">
+            <button type="submit" class="button" onclick="return ncWdBulkConfirm(this.form);">Apply to selected</button>
+            <span style="color:#666;margin-left:8px"><span id="nc-wd-selected-count">0</span> selected</span>
+        </form>
+
         <table class="wp-list-table widefat fixed striped" style="margin-top:10px">
             <thead>
                 <tr>
+                    <td class="manage-column column-cb check-column"><input type="checkbox" id="nc-wd-cb-all" form="nc-wd-bulk-form"></td>
                     <?php nc_admin_sortable_th( 'ID', 'id', $orderby, $order ); ?>
                     <th>Vendor</th>
                     <?php nc_admin_sortable_th( 'Amount', 'amount', $orderby, $order ); ?>
@@ -1288,13 +1624,14 @@ function nc_admin_withdrawal_page() {
             </thead>
             <tbody>
             <?php if ( empty( $rows ) ) : ?>
-                <tr><td colspan="9">No withdrawal requests.</td></tr>
+                <tr><td colspan="10">No withdrawal requests.</td></tr>
             <?php else : foreach ( $rows as $row ) :
                 $balance    = nc_vendor_pool_balance( $row->vendor_id );
                 $after      = round( $balance - (float) $row->amount, 2 );
                 $blocks_min = $after < NC_VENDOR_POOL_MIN_BALANCE;
                 ?>
                 <tr>
+                    <th class="check-column"><input type="checkbox" name="ids[]" value="<?php echo esc_attr( $row->id ); ?>" form="nc-wd-bulk-form" class="nc-wd-cb"></th>
                     <td>#<?php echo esc_html( $row->id ); ?><?php if ( $row->withdrawal_id ) echo '<br><small>' . esc_html( $row->withdrawal_id ) . '</small>'; ?></td>
                     <td>
                         <strong><?php echo esc_html( $row->vendor_name ?: 'User #' . $row->vendor_id ); ?></strong><br>
@@ -1359,7 +1696,7 @@ function nc_admin_withdrawal_page() {
                                 <input type="hidden" name="request_id" value="<?php echo esc_attr( $row->id ); ?>">
                                 <input type="text" name="wise_reference" placeholder="Wise Ref *" style="width:140px" required><br>
                                 <input type="text" name="admin_note" placeholder="Note (optional)" style="width:140px;margin-top:4px"><br>
-                                <button class="button button-primary" style="margin-top:4px" onclick="return confirm('Confirm Wise payout is processed and debit <?php echo esc_attr( number_format( (float) $row->amount, 2 ) ); ?> points from vendor pool?');">Mark Paid &amp; Debit</button>
+                                <button class="button button-primary" style="margin-top:4px" onclick="return confirm('Confirm Wise payout is processed and debit <?php echo esc_attr( number_format( (float) $row->amount, 2 ) ); ?> points from vendor pool?');">Approved and Send Email</button>
                             </form>
                         <?php else : ?>
                             <span style="color:#888">—</span>
@@ -1388,11 +1725,42 @@ function nc_admin_withdrawal_page() {
             </div>
         <?php endif; ?>
     </div>
+    <script>
+    (function () {
+        var all = document.getElementById('nc-wd-cb-all');
+        var rows = document.querySelectorAll('input.nc-wd-cb');
+        var counter = document.getElementById('nc-wd-selected-count');
+        function recount() { counter.textContent = document.querySelectorAll('input.nc-wd-cb:checked').length; }
+        if (all) {
+            all.addEventListener('change', function () {
+                rows.forEach(function (cb) { cb.checked = all.checked; });
+                recount();
+            });
+        }
+        rows.forEach(function (cb) { cb.addEventListener('change', recount); });
+    })();
+    function ncWdBulkConfirm(form) {
+        var action = form.bulk_action.value;
+        var ids = document.querySelectorAll('input.nc-wd-cb:checked');
+        if (!action) { alert('Choose a bulk action.'); return false; }
+        if (ids.length === 0) { alert('Select at least one row.'); return false; }
+        if (action === 'reject' && !form.bulk_note.value.trim()) { alert('A reason is required for bulk rejection.'); return false; }
+        var label = action === 'approve' ? 'approve' : (action === 'reject' ? 'reject' : 'permanently delete');
+        return confirm('Are you sure you want to ' + label + ' ' + ids.length + ' withdrawal request(s)?');
+    }
+    </script>
     <?php
 }
 
 function nc_admin_withdrawal_handle_action() {
-    $action     = sanitize_key( wp_unslash( $_POST['nc_wd_action'] ) );
+    $action = sanitize_key( wp_unslash( $_POST['nc_wd_action'] ) );
+
+    // Bulk path — different nonce, different inputs
+    if ( 'bulk' === $action ) {
+        nc_admin_withdrawal_handle_bulk();
+        return;
+    }
+
     $request_id = isset( $_POST['request_id'] ) ? (int) $_POST['request_id'] : 0;
     check_admin_referer( 'nc_wd_action_' . $request_id );
 
@@ -1432,6 +1800,8 @@ function nc_admin_withdrawal_handle_action() {
             'approval_date' => current_time( 'mysql' ),
         ), array( 'id' => $row->id ) );
 
+        nc_vendor_email_withdrawal_decided( $row, 'approved', $admin_note );
+
         wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( 'Request approved. Process Wise payout, then mark as paid.' ), wp_get_referer() ) );
         exit;
     }
@@ -1451,6 +1821,8 @@ function nc_admin_withdrawal_handle_action() {
             'approved_by'   => $admin_id,
             'approval_date' => current_time( 'mysql' ),
         ), array( 'id' => $row->id ) );
+
+        nc_vendor_email_withdrawal_decided( $row, 'rejected', $admin_note );
 
         wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( 'Request rejected.' ), wp_get_referer() ) );
         exit;
@@ -1506,6 +1878,8 @@ function nc_admin_withdrawal_handle_action() {
             exit;
         }
 
+        nc_vendor_check_low_balance( (int) $row->vendor_id );
+
         $log_tbl = $wpdb->prefix . 'myCRED_log';
         $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
             "SELECT id FROM {$log_tbl}
@@ -1525,7 +1899,113 @@ function nc_admin_withdrawal_handle_action() {
             'processed_date' => current_time( 'mysql' ),
         ), array( 'id' => $row->id ) );
 
+        // Notify vendor that the withdrawal has been paid
+        if ( function_exists( 'nc_email_send' ) ) {
+            $vendor = get_userdata( (int) $row->vendor_id );
+            if ( $vendor && $vendor->user_email ) {
+                $tokens = array(
+                    '{vendor_name}'      => $vendor->display_name ?: $vendor->user_login,
+                    '{amount}'           => number_format( (float) $row->amount, 2 ),
+                    '{withdrawal_id}'    => $wd_id,
+                    '{wise_reference}'   => $wise_ref,
+                    '{current_balance}'  => number_format( nc_vendor_pool_balance( (int) $row->vendor_id ), 2 ),
+                    '{site_name}'        => get_bloginfo( 'name' ),
+                );
+                nc_email_send( 'withdrawal_paid', $vendor->user_email, $tokens );
+            }
+        }
+
         wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( $wd_id . ' processed and debited.' ), wp_get_referer() ) );
         exit;
     }
+}
+
+/**
+ * Bulk action handler for Withdrawal Requests.
+ * Supports: approve, reject, delete. "Mark Paid" is intentionally NOT a bulk
+ * action because it requires a per-row Wise reference.
+ */
+function nc_admin_withdrawal_handle_bulk() {
+    check_admin_referer( 'nc_wd_bulk' );
+
+    $bulk = isset( $_POST['bulk_action'] ) ? sanitize_key( $_POST['bulk_action'] ) : '';
+    $ids  = isset( $_POST['ids'] ) ? array_map( 'absint', (array) $_POST['ids'] ) : array();
+    $note = isset( $_POST['bulk_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['bulk_note'] ) ) : '';
+    $ids  = array_values( array_filter( array_unique( $ids ) ) );
+
+    if ( ! in_array( $bulk, array( 'approve', 'reject', 'delete' ), true ) || empty( $ids ) ) {
+        wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'No action or no rows selected.' ), wp_get_referer() ) );
+        exit;
+    }
+    if ( $bulk === 'reject' && $note === '' ) {
+        wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'Rejection reason is required.' ), wp_get_referer() ) );
+        exit;
+    }
+
+    global $wpdb;
+    $tables   = nc_vendor_pool_tables();
+    $admin_id = get_current_user_id();
+    $done     = 0;
+    $skipped  = 0;
+
+    foreach ( $ids as $id ) {
+        $row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$tables['withdrawal']} WHERE id = %d", $id ) );
+        if ( ! $row ) { $skipped++; continue; }
+
+        if ( $bulk === 'delete' ) {
+            $wpdb->delete( $tables['withdrawal'], array( 'id' => $row->id ) );
+            $done++;
+            continue;
+        }
+
+        if ( $row->status !== 'pending' ) { $skipped++; continue; }
+
+        if ( $bulk === 'approve' ) {
+            $check = nc_vendor_can_request_withdrawal( $row->vendor_id, $row->amount );
+            if ( ! $check['ok'] ) { $skipped++; continue; }
+
+            $wpdb->update( $tables['withdrawal'], array(
+                'status'        => 'approved',
+                'admin_note'    => $note,
+                'approved_by'   => $admin_id,
+                'approval_date' => current_time( 'mysql' ),
+            ), array( 'id' => $row->id ) );
+
+            nc_vendor_email_withdrawal_decided( $row, 'approved', $note );
+            $done++;
+        }
+
+        if ( $bulk === 'reject' ) {
+            $wpdb->update( $tables['withdrawal'], array(
+                'status'        => 'rejected',
+                'admin_note'    => $note,
+                'approved_by'   => $admin_id,
+                'approval_date' => current_time( 'mysql' ),
+            ), array( 'id' => $row->id ) );
+
+            nc_vendor_email_withdrawal_decided( $row, 'rejected', $note );
+            $done++;
+        }
+    }
+
+    $msg = sprintf( 'Bulk %s: %d done, %d skipped (already processed, would breach minimum, or invalid).', $bulk, $done, $skipped );
+    wp_safe_redirect( add_query_arg( 'nc_admin_msg', rawurlencode( $msg ), wp_get_referer() ) );
+    exit;
+}
+
+/**
+ * Helper: send the unified withdrawal-decided email (approved or rejected).
+ */
+function nc_vendor_email_withdrawal_decided( $row, $status, $admin_note ) {
+    if ( ! function_exists( 'nc_email_send' ) ) { return; }
+    $vendor = get_userdata( (int) $row->vendor_id );
+    if ( ! $vendor || ! $vendor->user_email ) { return; }
+    $tokens = array(
+        '{vendor_name}' => $vendor->display_name ?: $vendor->user_login,
+        '{amount}'      => number_format( (float) $row->amount, 2 ),
+        '{status}'      => (string) $status,
+        '{admin_note}'  => (string) $admin_note,
+        '{site_name}'   => get_bloginfo( 'name' ),
+    );
+    nc_email_send( 'withdrawal_decided', $vendor->user_email, $tokens );
 }

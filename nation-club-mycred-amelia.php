@@ -55,6 +55,7 @@ require_once NC_MYCRE_AMELIA_PATH . 'includes/mycred-hooks.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-transactions.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-pool.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-statements.php';
+require_once NC_MYCRE_AMELIA_PATH . 'includes/test-reset.php'; // FOR TESTING ONLY — remove or gate before production
 
 
 
