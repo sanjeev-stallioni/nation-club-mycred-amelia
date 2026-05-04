@@ -947,6 +947,43 @@ add_action( 'admin_menu', function () {
     );
 } );
 
+/**
+ * Reorder Nation Club submenus. Runs after every module's add_action('admin_menu')
+ * has fired, so all entries are present in $GLOBALS['submenu'].
+ *
+ * Desired order: Dashboard → Top-up → Withdrawal → Monthly Statements →
+ *                Email Templates → Settings → Test Reset.
+ */
+add_action( 'admin_menu', function () {
+    if ( empty( $GLOBALS['submenu']['nation-club'] ) ) {
+        return;
+    }
+    $desired = array(
+        'nc-reconciliation',  // Dashboard
+        'nation-club',        // Top-up Requests (parent slug landing page)
+        'nc-withdrawals',     // Withdrawal Requests
+        'nc-statements',      // Monthly Statements
+        'nc-email-templates', // Email Templates
+        'nc-settings',        // Settings
+        'nc-test-reset',      // Test Reset
+    );
+    $by_slug = array();
+    foreach ( $GLOBALS['submenu']['nation-club'] as $item ) {
+        $by_slug[ $item[2] ] = $item;
+    }
+    $reordered = array();
+    foreach ( $desired as $slug ) {
+        if ( isset( $by_slug[ $slug ] ) ) {
+            $reordered[] = $by_slug[ $slug ];
+            unset( $by_slug[ $slug ] );
+        }
+    }
+    foreach ( $by_slug as $item ) {
+        $reordered[] = $item;
+    }
+    $GLOBALS['submenu']['nation-club'] = array_values( $reordered );
+}, 999 );
+
 /* -------------------------------------------------------------------------
  * 8. Admin page — Top-up Requests
  * ----------------------------------------------------------------------- */

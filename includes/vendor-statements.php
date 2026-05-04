@@ -1053,8 +1053,10 @@ function nc_admin_statement_view_page( $id ) {
             <table class="wp-list-table widefat striped" style="max-width:560px">
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
                 <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
-                <tr><td>Points issued to customers — earn liability (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+                <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+                <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
                 <tr><td>Points redeemed from vendor liability (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
+                <?php endif; ?>
                 <tr><td>Vendor top-ups (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
                 <tr><td>Vendor withdrawals (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
                 <tr><td>Expired Points Adjustment <em>(informational)</em></td><td style="text-align:right;color:#888"><?php echo esc_html( number_format( (float) $row->points_expired, 2 ) ); ?></td></tr>
@@ -1517,8 +1519,10 @@ function nc_statement_build_pdf_html( $row ) {
         <table class="summary">
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
             <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
-            <tr><td>Points issued to customers — earn liability (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+            <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+            <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
             <tr><td>Points redeemed from vendor liability (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
+            <?php endif; ?>
             <tr><td>Vendor top-ups (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
             <tr><td>Vendor withdrawals (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
             <tr><td>Expired Points Adjustment (informational)</td><td class="num muted"><?php echo esc_html( number_format( (float) $row->points_expired, 2 ) ); ?></td></tr>
