@@ -28,11 +28,18 @@ function nc_query_vendor_transactions( $user_id, $per_page = 10, $offset = 0 ) {
 
     $log_tbl = $wpdb->prefix . 'myCRED_log';
 
+    // Use COALESCE so refund rows (which carry batch_id, not a booking-style
+    // transaction_id) still get a unique grouping key per row. Older rows
+    // logged before we started stamping a synthetic 'transaction_id' for
+    // expired_refund still group cleanly via the batch_id fallback.
     $total = (int) $wpdb->get_var( $wpdb->prepare(
-        "SELECT COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')))
+        "SELECT COUNT(DISTINCT COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')),
+                CONCAT('BATCH-', JSON_UNQUOTE(JSON_EXTRACT(data, '$.batch_id')))
+         ))
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability')",
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')",
         $user_id
     ) );
 
@@ -42,16 +49,20 @@ function nc_query_vendor_transactions( $user_id, $per_page = 10, $offset = 0 ) {
 
     $items = $wpdb->get_results( $wpdb->prepare(
         "SELECT
-            JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')) AS txn_id,
-            JSON_UNQUOTE(JSON_EXTRACT(data, '$.service_id'))     AS service_id,
-            JSON_UNQUOTE(JSON_EXTRACT(data, '$.customer_id'))    AS customer_id,
-            SUM(creds)                                           AS net,
-            MIN(time)                                            AS occurred_at,
-            MAX(CASE WHEN ref = 'earn_liability' THEN entry END) AS entry_main,
-            MAX(entry)                                           AS entry_any
+            COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')),
+                CONCAT('BATCH-', JSON_UNQUOTE(JSON_EXTRACT(data, '$.batch_id')))
+            )                                                    AS txn_id,
+            MAX(JSON_UNQUOTE(JSON_EXTRACT(data, '$.service_id'))) AS service_id,
+            MAX(JSON_UNQUOTE(JSON_EXTRACT(data, '$.customer_id'))) AS customer_id,
+            MAX(ref)                                              AS sample_ref,
+            SUM(creds)                                            AS net,
+            MIN(time)                                             AS occurred_at,
+            MAX(CASE WHEN ref = 'earn_liability' THEN entry END)  AS entry_main,
+            MAX(entry)                                            AS entry_any
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability')
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')
          GROUP BY txn_id
          ORDER BY occurred_at DESC
          LIMIT %d OFFSET %d",
@@ -262,12 +273,17 @@ function nc_ajax_get_txn_breakdown() {
     $log_tbl = $wpdb->prefix . 'myCRED_log';
     $user_id = get_current_user_id();
 
+    // Match either a real booking transaction_id OR a synthetic BATCH-N id
+    // (used for expired_refund rows). The COALESCE keeps both in scope.
     $rows = $wpdb->get_results( $wpdb->prepare(
-        "SELECT ref, creds, entry
+        "SELECT ref, creds, entry, data, time
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability')
-           AND JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')) = %s
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')
+           AND COALESCE(
+                   JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')),
+                   CONCAT('BATCH-', JSON_UNQUOTE(JSON_EXTRACT(data, '$.batch_id')))
+               ) = %s
          ORDER BY id ASC",
         $user_id,
         $txn_id
@@ -281,10 +297,55 @@ function nc_ajax_get_txn_breakdown() {
         'redeem_accept'    => __( 'Customer redeemed points', 'nation-club-mycred-amelia' ),
         'redeem_liability' => __( 'Old points liability cleared', 'nation-club-mycred-amelia' ),
         'earn_liability'   => __( 'New points issued', 'nation-club-mycred-amelia' ),
+        'expired_refund'   => __( 'Customer batch expired — refunded to your pool', 'nation-club-mycred-amelia' ),
     );
 
     $net  = 0.0;
     $html = '<div class="nc-txn-breakdown">';
+
+    // For pure refund rows, render an extra context block with the batch
+    // history (when did the customer earn it, how much, what's left).
+    if ( count( $rows ) === 1 && $rows[0]->ref === 'expired_refund' ) {
+        $row     = $rows[0];
+        $payload = json_decode( $row->data, true );
+        $batch_id = isset( $payload['batch_id'] ) ? (int) $payload['batch_id'] : 0;
+        $earned_ts = isset( $payload['earned_ts'] ) ? (int) $payload['earned_ts'] : 0;
+        $expiry_ts = isset( $payload['expiry_ts'] ) ? (int) $payload['expiry_ts'] : 0;
+
+        // Pull the batch row for original-amount context
+        $batch_tbl = $wpdb->prefix . 'nc_customer_point_batches';
+        $batch     = $batch_id ? $wpdb->get_row( $wpdb->prepare(
+            "SELECT customer_user_id, earned_amount, remaining_amount FROM {$batch_tbl} WHERE id = %d",
+            $batch_id
+        ) ) : null;
+
+        $cust_user_id = $batch ? (int) $batch->customer_user_id : 0;
+        $cust_user    = $cust_user_id ? get_user_by( 'id', $cust_user_id ) : null;
+        $cust_label   = $cust_user ? ( $cust_user->display_name ?: $cust_user->user_login ) : 'Customer';
+
+        $html .= '<div class="nc-txn-context" style="background:#fff8e1;border-left:3px solid #f0c674;padding:10px 12px;margin-bottom:10px;font-size:13px;color:#5c4500;border-radius:4px">';
+        $html .= sprintf( '<strong>%s</strong><br>', esc_html__( 'Points refund details', 'nation-club-mycred-amelia' ) );
+
+        if ( $batch ) {
+            $html .= sprintf(
+                '<span>%s: %s — %s pts originally earned %s</span>',
+                esc_html__( 'From customer', 'nation-club-mycred-amelia' ),
+                esc_html( $cust_label ),
+                esc_html( number_format( (float) $batch->earned_amount, 2 ) ),
+                $earned_ts ? esc_html( date_i18n( 'M j, Y', $earned_ts ) ) : '—'
+            );
+        }
+        if ( $expiry_ts ) {
+            $html .= sprintf(
+                '<br><span>%s: %s</span>',
+                esc_html__( 'Expired on', 'nation-club-mycred-amelia' ),
+                esc_html( date_i18n( 'M j, Y', $expiry_ts ) )
+            );
+        }
+        $html .= sprintf( '<br><span>%s #%d</span>', esc_html__( 'Batch', 'nation-club-mycred-amelia' ), $batch_id );
+        $html .= '</div>';
+    }
+
     foreach ( $rows as $row ) {
         $creds     = (float) $row->creds;
         $net      += $creds;

@@ -13,7 +13,8 @@
  *   - Total Top-ups           = sum of vendor_topup ledger entries
  *   - Total Withdrawals       = sum of vendor_withdrawal entries (abs)
  *   - Total Expired           = sum of points_expiry entries (abs)
- *   - Expected Total          = topups − withdrawals − expired
+ *   - Expected Total          = topups − withdrawals
+ *                               (expired now refunds vendor → net 0 in System)
  *   - Status                  = Balanced / Mismatch (delta)
  *
  * Auto-refreshes every 30 seconds via AJAX so the page stays current
@@ -141,13 +142,17 @@ function nc_reconciliation_calculate() {
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'vendor_withdrawal'"
     ) );
 
-    // Customer points expired (informational, NOT credited back to vendor)
+    // Customer points expired (per-batch system: customer −X, origin vendor +X
+    // via expired_refund — System Total unchanged, so we don't subtract it
+    // from Expected). Surfaced for transparency in the breakdown only.
     $total_expired = abs( (float) $wpdb->get_var(
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'points_expiry'"
     ) );
 
-    // Expected = real money in, less money out, less points lost to expiry
-    $expected_total = $total_topups - $total_withdrawals - $total_expired;
+    // Expected = real money in, less money out. Expiry now refunds the origin
+    // vendor (expired_refund), so the customer-side debit is matched by a
+    // vendor-side credit — net change to System Total is zero.
+    $expected_total = $total_topups - $total_withdrawals;
 
     $delta    = round( $system_total - $expected_total, 2 );
     $balanced = abs( $delta ) < 0.01;
@@ -243,7 +248,8 @@ function nc_reconciliation_calculate_as_of( $cutoff_ts ) {
         $cutoff_ts
     ) ) );
 
-    $expected_total = $total_topups - $total_withdrawals - $total_expired;
+    // Same formula as live calc: expiry refunds vendor → net 0 → not subtracted.
+    $expected_total = $total_topups - $total_withdrawals;
     $delta          = round( $system_total - $expected_total, 2 );
     $balanced       = abs( $delta ) < 0.01;
 
@@ -323,7 +329,9 @@ function nc_reconciliation_calculate_this_month() {
         $start_ts, $end_ts
     ) ) );
 
-    $expected_now = $initial + $topups - $withdrawals - $expired;
+    // Expiry now refunds vendor pool (expired_refund), so customer-side
+    // debit is matched by vendor-side credit — net 0 on System Total.
+    $expected_now = $initial + $topups - $withdrawals;
 
     // Reuse the lifetime calc for the "actual now" number
     $live       = nc_reconciliation_calculate();
@@ -671,7 +679,7 @@ function nc_admin_reconciliation_page() {
             <div class="nc-recon-card nc-recon-card--expected">
                 <div class="lbl">Expected Total <span style="font-weight:400;text-transform:none;letter-spacing:0">(lifetime)</span></div>
                 <div class="val" data-key="expected_total"><?php echo esc_html( number_format( $r['expected_total'], 2 ) ); ?></div>
-                <div class="sub">topups − withdrawals − expired</div>
+                <div class="sub">topups − withdrawals</div>
             </div>
         </div>
 
@@ -707,13 +715,13 @@ function nc_admin_reconciliation_page() {
                         <td>− Withdrawals paid out this month</td>
                         <td class="num neg">−<span data-tm-key="withdrawals"><?php echo esc_html( number_format( $tm['withdrawals'], 2 ) ); ?></span></td>
                     </tr>
-                    <tr>
-                        <td>− Customer points expired this month</td>
-                        <td class="num neg">−<span data-tm-key="expired"><?php echo esc_html( number_format( $tm['expired'], 2 ) ); ?></span></td>
-                    </tr>
                     <tr class="total">
                         <td><strong>= Expected System Total now</strong></td>
                         <td class="num"><strong><span data-tm-key="expected_now"><?php echo esc_html( number_format( $tm['expected_now'], 2 ) ); ?></span></strong></td>
+                    </tr>
+                    <tr>
+                        <td><em>Expired customer points this month (informational)</em><br><small style="color:#888">Customer −X / origin vendor +X — net 0 effect</small></td>
+                        <td class="num" style="color:#888"><span data-tm-key="expired"><?php echo esc_html( number_format( $tm['expired'], 2 ) ); ?></span></td>
                     </tr>
                     <tr class="actual">
                         <td><strong>Actual System Total now</strong></td>
@@ -760,13 +768,13 @@ function nc_admin_reconciliation_page() {
                     <td>Total Withdrawals (vendor_withdrawal)</td>
                     <td style="text-align:right;color:#c62828;font-weight:600">−<span data-key="total_withdrawals"><?php echo esc_html( number_format( $r['total_withdrawals'], 2 ) ); ?></span></td>
                 </tr>
-                <tr>
-                    <td>Total Expired Customer Points (points_expiry)</td>
-                    <td style="text-align:right;color:#c62828;font-weight:600">−<span data-key="total_expired"><?php echo esc_html( number_format( $r['total_expired'], 2 ) ); ?></span></td>
-                </tr>
                 <tr style="background:#f0f0f0">
                     <td><strong>Expected Total</strong></td>
                     <td style="text-align:right;font-weight:700"><span data-key="expected_total_2"><?php echo esc_html( number_format( $r['expected_total'], 2 ) ); ?></span></td>
+                </tr>
+                <tr>
+                    <td><em>Expired customer points (informational)</em><br><small style="color:#888">Customer −X / origin vendor +X (expired_refund) — net 0 effect on System Total</small></td>
+                    <td style="text-align:right;color:#888"><span data-key="total_expired"><?php echo esc_html( number_format( $r['total_expired'], 2 ) ); ?></span></td>
                 </tr>
             </tbody>
         </table>
@@ -881,10 +889,11 @@ function nc_admin_reconciliation_page() {
 
         <p style="color:#888;font-size:12px;margin-top:18px">
             <strong>How to read this dashboard:</strong>
-            "Expected Total (lifetime)" = all real money ever put into the system via Wise top-ups, minus withdrawals paid out,
-            minus customer points that have expired. "System Total" = sum of every balance the system currently holds.
-            They should match exactly. The "This Month" section above is a rolling check — it pinpoints which calendar month
-            a discrepancy first appeared, by comparing this month's activity against where the system started on the 1st
+            "Expected Total (lifetime)" = all real money ever put into the system via Wise top-ups, minus withdrawals paid out.
+            "System Total" = sum of every balance the system currently holds. They should match exactly.
+            Expired customer points are now refunded to the originating vendor (expired_refund), so they net out to zero across the system —
+            they're shown for transparency but don't subtract from Expected. The "This Month" section above is a rolling check — it pinpoints
+            which calendar month a discrepancy first appeared, by comparing this month's activity against where the system started on the 1st
             (taken from the previous month's snapshot). Snapshots freeze these numbers monthly for the official accounting record.
         </p>
     </div>

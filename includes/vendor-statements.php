@@ -32,7 +32,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'NC_STATEMENT_DB_VERSION', '1.1.0' );
+define( 'NC_STATEMENT_DB_VERSION', '1.2.0' );
 
 /* -------------------------------------------------------------------------
  * 1. Schema
@@ -62,6 +62,7 @@ function nc_statements_install() {
         points_topup DECIMAL(12,2) NOT NULL DEFAULT 0,
         points_withdrawal DECIMAL(12,2) NOT NULL DEFAULT 0,
         points_expired DECIMAL(12,2) NOT NULL DEFAULT 0,
+        points_expired_refund DECIMAL(12,2) NOT NULL DEFAULT 0,
         shared_costs DECIMAL(12,2) NOT NULL DEFAULT 0,
         topup_required DECIMAL(12,2) NOT NULL DEFAULT 0,
         surplus DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -191,7 +192,7 @@ function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
     $opening = nc_statement_balance_at( $vendor_id, $bounds['start_ts'] - 1 );
     $entries = nc_statement_fetch_entries( $vendor_id, $bounds['start_ts'], $bounds['end_ts'] );
 
-    $accepted = 0; $earn_liab = 0; $redeem_liab = 0; $topup = 0; $withdrawal = 0;
+    $accepted = 0; $earn_liab = 0; $redeem_liab = 0; $topup = 0; $withdrawal = 0; $expired_refund = 0;
 
     foreach ( $entries as $row ) {
         $creds = (float) $row->creds;
@@ -211,6 +212,9 @@ function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
             case 'vendor_withdrawal':
                 $withdrawal += abs( $creds );
                 break;
+            case 'expired_refund':
+                $expired_refund += $creds;
+                break;
         }
     }
 
@@ -221,7 +225,7 @@ function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
     }
 
     $shared_costs = round( max( 0, (float) $shared_costs ), 2 );
-    $closing      = round( $opening + $accepted - $earn_liab - $redeem_liab + $topup - $withdrawal - $shared_costs, 2 );
+    $closing      = round( $opening + $accepted - $earn_liab - $redeem_liab + $topup - $withdrawal + $expired_refund - $shared_costs, 2 );
 
     $min = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? NC_VENDOR_POOL_MIN_BALANCE : 1000;
     $topup_required = max( 0, round( $min - $closing, 2 ) );
@@ -235,6 +239,7 @@ function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
         'points_topup'            => round( $topup, 2 ),
         'points_withdrawal'       => round( $withdrawal, 2 ),
         'points_expired'          => round( $expired, 2 ),
+        'points_expired_refund'   => round( $expired_refund, 2 ),
         'shared_costs'            => $shared_costs,
         'closing_balance'         => $closing,
         'topup_required'          => $topup_required,
@@ -296,6 +301,7 @@ function nc_statement_generate( $vendor_id, $month_str, $admin_id, $shared_costs
         'points_topup'            => $calc['points_topup'],
         'points_withdrawal'       => $calc['points_withdrawal'],
         'points_expired'          => $calc['points_expired'],
+        'points_expired_refund'   => $calc['points_expired_refund'],
         'shared_costs'            => $calc['shared_costs'],
         'topup_required'          => $calc['topup_required'],
         'surplus'                 => $calc['surplus'],
@@ -812,6 +818,11 @@ function nc_admin_statements_list_page() {
                 <input type="hidden" name="nc_stmt_action" value="run_reminder_now">
                 <button type="submit" class="button" onclick="return confirm('Force-run the top-up reminder cron right now? Vendors below SGD 1,000 will be emailed.');">Run Top-up Reminder (Test)</button>
             </form>
+            <form method="post" style="display:inline">
+                <?php wp_nonce_field( 'nc_stmt_run_batch_expiry' ); ?>
+                <input type="hidden" name="nc_stmt_action" value="run_batch_expiry_now">
+                <button type="submit" class="button" onclick="return confirm('Force-run the per-batch expiry cron right now? Any batches whose expiry_ts has passed will be expired and the originating vendor will be refunded.');">Run Batch Expiry (Test)</button>
+            </form>
             <?php
             $log_url = '';
             if ( function_exists( 'wp_upload_dir' ) ) {
@@ -1059,7 +1070,9 @@ function nc_admin_statement_view_page( $id ) {
                 <?php endif; ?>
                 <tr><td>Vendor top-ups (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
                 <tr><td>Vendor withdrawals (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-                <tr><td>Expired Points Adjustment <em>(informational)</em></td><td style="text-align:right;color:#888"><?php echo esc_html( number_format( (float) $row->points_expired, 2 ) ); ?></td></tr>
+                <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
+                <tr><td>Refund from expired customer points (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
+                <?php endif; ?>
                 <tr>
                     <td>Shared costs / subscription <em>(−)</em></td>
                     <td style="text-align:right">
@@ -1291,6 +1304,16 @@ function nc_admin_statements_handle_post() {
         check_admin_referer( 'nc_stmt_run_reminder' );
         nc_statement_topup_reminder_handler( true );
         nc_stmt_redirect_back( 'msg', 'Top-up reminder cron run forced. Check nc-statement-cron.log for the per-vendor result.' );
+    }
+
+    if ( 'run_batch_expiry_now' === $action ) {
+        check_admin_referer( 'nc_stmt_run_batch_expiry' );
+        if ( function_exists( 'nc_batch_expiry_cron_handler' ) ) {
+            nc_batch_expiry_cron_handler( true );
+            nc_stmt_redirect_back( 'msg', 'Per-batch expiry cron run forced. Check nc-statement-cron.log for how many batches were expired and refunded.' );
+        } else {
+            nc_stmt_redirect_back( 'err', 'Batch expiry handler not loaded.' );
+        }
     }
 
     if ( 'update_shared_costs' === $action ) {
@@ -1525,7 +1548,9 @@ function nc_statement_build_pdf_html( $row ) {
             <?php endif; ?>
             <tr><td>Vendor top-ups (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
             <tr><td>Vendor withdrawals (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-            <tr><td>Expired Points Adjustment (informational)</td><td class="num muted"><?php echo esc_html( number_format( (float) $row->points_expired, 2 ) ); ?></td></tr>
+            <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
+            <tr><td>Refund from expired customer points (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
+            <?php endif; ?>
             <tr><td>Shared costs / subscription (−)</td><td class="num <?php echo $row->shared_costs > 0 ? 'neg' : ''; ?>"><?php echo $row->shared_costs > 0 ? '−' : ''; ?><?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>

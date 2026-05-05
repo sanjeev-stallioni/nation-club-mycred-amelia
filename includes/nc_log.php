@@ -1,10 +1,8 @@
 <?php
 
 function nc_debug($msg) {
-    if (!function_exists('wp_upload_dir')) return;
-    $upload = wp_upload_dir();
-    if (empty($upload['basedir'])) return;
-    $file = trailingslashit($upload['basedir']) . 'nc-debug.log';
+    if ( ! defined( 'WP_CONTENT_DIR' ) ) return;
+    $file = trailingslashit( WP_CONTENT_DIR ) . 'mycred-debug.log';
     $line = '[' . date('Y-m-d H:i:s') . '] ' . $msg . PHP_EOL;
     @file_put_contents($file, $line, FILE_APPEND | LOCK_EX);
 }

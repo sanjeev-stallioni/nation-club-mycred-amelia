@@ -8,7 +8,8 @@
  *
  * Capabilities:
  *   - Truncate plugin tables: nc_topup_requests, nc_withdrawal_requests,
- *     nc_statements, myCRED_log
+ *     nc_statements, nc_customer_point_batches, nc_reconciliation_snapshots,
+ *     myCRED_log
  *   - Reset a vendor or customer balance to 0 and clear booking-idempotency
  *     and low-balance-alert flags
  *   - Quick-reset buttons for the 3 known test accounts
@@ -77,9 +78,19 @@ function nc_test_reset_table_name( $key ) {
         case 'topup':       return $wpdb->prefix . 'nc_topup_requests';
         case 'withdrawal':  return $wpdb->prefix . 'nc_withdrawal_requests';
         case 'statements':  return $wpdb->prefix . 'nc_statements';
+        case 'batches':     return $wpdb->prefix . 'nc_customer_point_batches';
+        case 'snapshots':   return $wpdb->prefix . 'nc_reconciliation_snapshots';
         case 'mycred_log':  return $wpdb->prefix . 'myCRED_log';
     }
     return '';
+}
+
+/**
+ * The full set of plugin tables that "Truncate All" / "Reset Everything"
+ * sweep through. Extend here when adding new plugin tables.
+ */
+function nc_test_reset_all_table_keys() {
+    return array( 'topup', 'withdrawal', 'statements', 'batches', 'snapshots', 'mycred_log' );
 }
 
 function nc_test_reset_table_count( $key ) {
@@ -171,7 +182,7 @@ function nc_admin_test_reset_handle_post() {
     }
 
     if ( $action === 'truncate_all_tables' ) {
-        foreach ( array( 'topup', 'withdrawal', 'statements', 'mycred_log' ) as $k ) {
+        foreach ( nc_test_reset_all_table_keys() as $k ) {
             $r = nc_test_reset_truncate( $k );
             $r['ok'] ? $messages[] = $r['message'] : $errors[] = $r['message'];
         }
@@ -202,7 +213,7 @@ function nc_admin_test_reset_handle_post() {
 
     if ( $action === 'reset_everything' ) {
         // Tables first
-        foreach ( array( 'topup', 'withdrawal', 'statements', 'mycred_log' ) as $k ) {
+        foreach ( nc_test_reset_all_table_keys() as $k ) {
             $r = nc_test_reset_truncate( $k );
             $r['ok'] ? $messages[] = $r['message'] : $errors[] = $r['message'];
         }
@@ -231,12 +242,10 @@ function nc_admin_test_reset_page() {
         nc_admin_test_reset_handle_post();
     }
 
-    $counts = array(
-        'topup'      => nc_test_reset_table_count( 'topup' ),
-        'withdrawal' => nc_test_reset_table_count( 'withdrawal' ),
-        'statements' => nc_test_reset_table_count( 'statements' ),
-        'mycred_log' => nc_test_reset_table_count( 'mycred_log' ),
-    );
+    $counts = array();
+    foreach ( nc_test_reset_all_table_keys() as $k ) {
+        $counts[ $k ] = nc_test_reset_table_count( $k );
+    }
 
     $quick = nc_test_reset_quick_accounts();
     ?>
@@ -272,6 +281,8 @@ function nc_admin_test_reset_page() {
                         'topup'      => 'wp_nc_topup_requests (Top-up Requests)',
                         'withdrawal' => 'wp_nc_withdrawal_requests (Withdrawal Requests)',
                         'statements' => 'wp_nc_statements (Monthly Statements)',
+                        'batches'    => 'wp_nc_customer_point_batches (Customer Point Batches)',
+                        'snapshots'  => 'wp_nc_reconciliation_snapshots (Reconciliation Snapshots)',
                         'mycred_log' => 'wp_myCRED_log (myCRED Log)',
                     ) as $k => $label ) : ?>
                         <tr>
@@ -293,7 +304,7 @@ function nc_admin_test_reset_page() {
             <form method="post" style="margin-top:14px">
                 <?php wp_nonce_field( 'nc_test_reset' ); ?>
                 <input type="hidden" name="nc_test_action" value="truncate_all_tables">
-                <button type="submit" class="button button-secondary" onclick="return confirm('Truncate ALL 4 plugin tables? This deletes every top-up, withdrawal, statement, and myCRED log row. Continue?');">⚠️ Truncate ALL 4 Tables</button>
+                <button type="submit" class="button button-secondary" onclick="return confirm('Truncate ALL 6 plugin tables? This deletes every top-up, withdrawal, statement, customer point batch, reconciliation snapshot, and myCRED log row. Continue?');">⚠️ Truncate ALL 6 Tables</button>
             </form>
         </div>
 
@@ -359,11 +370,11 @@ function nc_admin_test_reset_page() {
         <!-- Full reset -->
         <div style="background:#fbeaea;padding:18px;border:2px solid #c62828;border-radius:4px;margin-top:24px;max-width:760px">
             <h2 style="margin-top:0;color:#c62828">⚠️ Full Reset</h2>
-            <p>Truncates all 4 tables AND resets all <?php echo count( $quick ); ?> quick-reset users to 0 in one click.</p>
+            <p>Truncates all 6 plugin tables AND resets all <?php echo count( $quick ); ?> quick-reset users to 0 in one click.</p>
             <form method="post">
                 <?php wp_nonce_field( 'nc_test_reset' ); ?>
                 <input type="hidden" name="nc_test_action" value="reset_everything">
-                <button type="submit" class="button button-primary" style="background:#c62828;border-color:#a31515" onclick="return confirm('🚨 RESET EVERYTHING — wipe all 4 tables AND zero out all quick-reset users? This cannot be undone. Continue?');">RESET EVERYTHING</button>
+                <button type="submit" class="button button-primary" style="background:#c62828;border-color:#a31515" onclick="return confirm('🚨 RESET EVERYTHING — wipe all 6 plugin tables AND zero out all quick-reset users? This cannot be undone. Continue?');">RESET EVERYTHING</button>
             </form>
         </div>
     </div>

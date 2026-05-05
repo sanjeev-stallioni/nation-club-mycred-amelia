@@ -8,23 +8,11 @@ add_action('amelia_after_appointment_status_updated', 'mycred_appointment_status
 // Hook 2: When appointment is saved (catches invoice updates after approval)
 add_action('amelia_after_appointment_updated', 'mycred_appointment_updated', 10, 5);
 
-function get_mycred_customer_expiry_timestamp()
-{
-
-    // WordPress timezone-aware month
-    $month = (int) wp_date('n');
-    $year  = (int) wp_date('Y');
-
-    if ($month >= 1 && $month <= 6) {
-        // 31 December current year
-        $expiry_date = $year . '-12-31 23:59:59';
-    } else {
-        // 30 June next year
-        $expiry_date = ($year + 1) . '-06-30 23:59:59';
-    }
-
-    return (new DateTime($expiry_date, wp_timezone()))->getTimestamp();
-}
+// get_mycred_customer_expiry_timestamp() is defined in includes/expiry-rules.php
+// (configurable via Nation Club → Expiry Rules + master Disable toggle).
+// Returns false when expiry is disabled OR no rule window matches today —
+// the earn flow below already guards against non-numeric values when stamping
+// `mycred_points_expiry` user_meta, so a "no expiry" state is handled cleanly.
 
 /**
  * Handler for status change hook
@@ -252,6 +240,18 @@ function mycred_process_appointment($appointment, $trigger)
                 $customer_redeem_log_data
             );
 
+            // Per-batch FIFO consumption — reduce remaining_amount on the
+            // customer's oldest active batches first. Keeps batch tracking in
+            // sync with the customer's actual balance so expiry refunds the
+            // correct origin vendor for the correct remaining amount.
+            if ( function_exists('nc_batch_consume_fifo') ) {
+                $consumed = nc_batch_consume_fifo( $wp_user_id, $redeem_amount );
+                if ( ! empty($consumed) ) {
+                    $summary = array_map(function($c) { return "#{$c['batch_id']}:" . number_format($c['amount'], 2); }, $consumed);
+                    $wlog("📤 FIFO consumed " . number_format($redeem_amount, 2) . " pts across " . count($consumed) . " batch(es): " . implode(', ', $summary));
+                }
+            }
+
             if (is_array($custom_fields) && !empty($custom_fields)) {
                 foreach ($custom_fields as $k => $fld) {
                     if (is_array($fld) && isset($fld['label']) && stripos($fld['label'], 'invoice') !== false) {
@@ -344,8 +344,29 @@ function mycred_process_appointment($appointment, $trigger)
                     $customer_log_data
                 );
 
-                // Save expiry ONLY for customer
-                update_user_meta($wp_user_id, 'mycred_points_expiry', $expiry_ts);
+                // Save expiry ONLY for customer — and only if expiry is enabled
+                // and a rule window matched. When disabled, we leave existing
+                // expiry meta alone so previously stamped customers still expire
+                // on schedule until admin re-enables.
+                if ( $expiry_ts && is_numeric( $expiry_ts ) ) {
+                    update_user_meta($wp_user_id, 'mycred_points_expiry', (int) $expiry_ts);
+                }
+
+                // Resolve the origin vendor's WP user id (Amelia provider id → WP id)
+                $origin_vendor_wp_id = (int) $wpdb->get_var($wpdb->prepare(
+                    "SELECT externalId FROM {$amelia_users_tbl} WHERE id = %d",
+                    intval($providerId)
+                ));
+
+                // Per-batch expiry: create a tracked batch row so the customer's
+                // earnings can be expired individually (and refunded to the
+                // origin vendor) on their own schedule.
+                if ( $origin_vendor_wp_id > 0 && function_exists('nc_batch_create') ) {
+                    $batch_id = nc_batch_create( $wp_user_id, $origin_vendor_wp_id, $points );
+                    if ( $batch_id ) {
+                        $wlog("📦 Created batch #{$batch_id}: {$points} pts from vendor {$origin_vendor_wp_id} for customer {$wp_user_id}.");
+                    }
+                }
 
                 update_user_meta($wp_user_id, 'mycred_awarded_appt_' . $appointmentId, 1);
 
@@ -388,114 +409,21 @@ function mycred_process_appointment($appointment, $trigger)
 }
 
 
-// Expire points
-add_action('wp_loaded', function () {
-
-    $user_id = get_current_user_id();
-
-    if ($user_id <= 0) {
-        return;
-    }
-
-    mycred_maybe_expire_user_points($user_id);
-});
-
-function mycred_maybe_expire_user_points($user_id)
-{
-
-    global $wpdb;
-
-    $user_id = (int) $user_id;
-
-    nc_expiry_debug("=== [USER EXPIRY] Start for user {$user_id} ===");
-
-    if ($user_id <= 0) {
-        nc_expiry_debug('[USER EXPIRY] ❌ Invalid user ID.');
-        return;
-    }
-
-    if (! function_exists('mycred_add')) {
-        nc_expiry_debug('[USER EXPIRY] ❌ myCRED not loaded.');
-        return;
-    }
-
-    // ---- get expiry timestamp ----
-    $expiry_ts = get_user_meta($user_id, 'mycred_points_expiry', true);
-
-    if (empty($expiry_ts) || ! is_numeric($expiry_ts)) {
-        nc_expiry_debug("[USER EXPIRY] User {$user_id} has no valid expiry timestamp.");
-        return;
-    }
-
-    $expiry_ts = (int) $expiry_ts;
-    // $today_midnight_ts = ( new DateTime(
-    //     wp_date( 'Y-m-d 00:00:00' ),
-    //     wp_timezone()
-    // ) )->getTimestamp();
-
-    // if ( $expiry_ts > $today_midnight_ts ) {
-    //     nc_expiry_debug('[USER EXPIRY] ⏸ Not expired yet.');
-    //     return;
-    // }
-    $now_ts = current_time('timestamp');
-
-    if ($expiry_ts > $now_ts) {
-        nc_expiry_debug('[USER EXPIRY] ⏸ Not expired yet.');
-        return;
-    }
-
-    // ---- get balance ----
-    $balance = round(mycred_get_users_balance($user_id), 2);
-
-    if ($balance <= 0) {
-        delete_user_meta($user_id, 'mycred_points_expiry');
-        nc_expiry_debug('[USER EXPIRY] Zero balance → expiry meta cleared.');
-        return;
-    }
-
-    // ---- get last relevant myCRED log ----
-    $log_table = $wpdb->prefix . 'myCRED_log';
-
-    $last_log = $wpdb->get_row(
-        $wpdb->prepare(
-            "
-            SELECT ref, ref_id, data
-            FROM {$log_table}
-            WHERE user_id = %d
-            AND ref IN ('booking_reward','booking_redeem')
-            ORDER BY id DESC
-            LIMIT 1
-            ",
-            $user_id
-        )
-    );
-
-    $data   = ($last_log && ! empty($last_log->data)) ? $last_log->data : '';
-    $ref_id = ($last_log && ! empty($last_log->ref_id)) ? (int) $last_log->ref_id : 0;
-
-    nc_expiry_debug(
-        '[USER EXPIRY] data = ' . print_r($data, true)
-    );
-
-    // ---- expire points ----
-    mycred_add(
-        'points_expiry',
-        $user_id,
-        -$balance,
-        sprintf(
-            '%s points expired on %s',
-            number_format($balance, 2),
-            wp_date('M jS Y', $expiry_ts)
-        ),
-        $ref_id,
-        $data
-    );
-
-    delete_user_meta($user_id, 'mycred_points_expiry');
-
-    nc_expiry_debug("[USER EXPIRY] ❌ {$balance} points expired for user {$user_id}");
-    nc_expiry_debug("=== [USER EXPIRY] End for user {$user_id} ===");
-}
+// Legacy passive expiry — DEPRECATED.
+//
+// The old design expired the customer's entire balance based on a single
+// `mycred_points_expiry` user_meta date and ran on every wp_loaded for
+// logged-in customers. It did NOT refund the originating vendor and did NOT
+// differentiate batches by source vendor or earn date.
+//
+// Replaced by the per-batch system in includes/customer-point-batches.php:
+//   - Each earn becomes its own batch row (with its own expiry_ts)
+//   - Redemptions consume FIFO across batches
+//   - Daily cron expires batches and posts an `expired_refund` to the
+//     originating vendor (so funded value returns to where it came from)
+//
+// The user_meta `mycred_points_expiry` is still written by the earn flow as
+// a soft hint for legacy code paths, but no longer drives expiry behavior.
 
 
 function findExpAndPoints($user_id)

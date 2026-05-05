@@ -964,7 +964,9 @@ add_action( 'admin_menu', function () {
         'nc-withdrawals',     // Withdrawal Requests
         'nc-statements',      // Monthly Statements
         'nc-email-templates', // Email Templates
+        'nc-expiry-rules',    // Expiry Rules
         'nc-settings',        // Settings
+        'nc-log',             // Log
         'nc-test-reset',      // Test Reset
     );
     $by_slug = array();

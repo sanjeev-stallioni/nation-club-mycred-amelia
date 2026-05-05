@@ -19,9 +19,9 @@ Custom WordPress plugin that integrates [myCRED](https://mycred.me/) with [Ameli
 7. **Email notification system.** Eight customizable templates (statement, top-up submitted/approved/rejected, withdrawal submitted/approved-rejected/paid, top-up reminder, low balance alert) with token replacement, plus a global CC field that copies every email to admin/accounts.
 8. **Top-up reminder cron.** On day 6 and 7 of each month, the system emails any vendor whose balance is below SGD 1,000 (skipping vendors whose pending top-up already covers the shortfall).
 9. **Event-based low-balance alert.** When a vendor's balance crosses below a configurable threshold (default SGD 300) — e.g. after a customer redemption settlement — they receive a one-time alert. The flag clears the moment they recover above the threshold.
-10. **Real-time Reconciliation Dashboard.** Live "System Health Check" — Total Vendor Pool, Total Customer Points, System Total, Expected Total (top-ups − withdrawals − expired), Balanced/Mismatch banner with delta. Auto-refreshes every 30 seconds. Per-vendor balance breakdown highlights vendors below minimum or at zero.
-11. **Month-end locked snapshots.** Auto-captured on the 1st of each month into an immutable history table, providing the official frozen accounting record separate from the live view.
-12. **Role-based expiry.** Customer points expire on a rolling half-year schedule (Jan–Jun → 31 Dec; Jul–Dec → 30 Jun of next year). Expired points are informational only on the statement — not credited back to the vendor.
+10. **Real-time Reconciliation Dashboard.** Live "System Health Check" — Total Vendor Pool, Total Customer Points, System Total, Expected Total (top-ups − withdrawals), Balanced/Mismatch banner with delta. Auto-refreshes every 30 seconds. Per-vendor balance breakdown (paginated) highlights vendors below minimum or at zero. Includes a "This Month" rolling check section that compares this month's activity against the prior month's snapshot to help pinpoint when a discrepancy started.
+11. **Month-end locked snapshots.** Auto-captured on the 1st of each month into an immutable history table (paginated), providing the official frozen accounting record separate from the live view. Past-month captures back-calculate from current state minus post-cutoff log entries so historical snapshots reflect month-end state, not current state.
+12. **Per-batch expiry with origin-vendor refund.** Each customer earn becomes its own batch, tracked with its own expiry date and source vendor. New earns from one vendor never extend the expiry of points from another vendor. Redemptions consume FIFO (oldest batches first). When a batch expires: customer is debited (`points_expiry`) AND the origin vendor is refunded the equivalent points (`expired_refund`) — net system effect zero, vendor's funded value released back to their pool. Expiry windows are configurable from **Nation Club → Expiry Rules** (date-only inputs; auto-rolls each January). Master switch can disable expiry entirely.
 13. **Employee-panel visibility.** In Amelia's employee panel, opening a customer row shows their myCRED balance and last service *with the current vendor* (not global).
 14. **Log columns & export.** Adds Vendor Name, Username, Service, Transaction ID, and Origin Vendor columns to the myCRED log. One-click CSV download of the full ledger.
 
@@ -71,14 +71,16 @@ Services not listed fall back to **5%**.
 | `redeem_liability` | − vendor | **DEPRECATED.** Old origin-vendor settlement debit. No longer created — historical entries remain for audit. |
 | `vendor_topup` | + vendor | Admin-approved Wise top-up |
 | `vendor_withdrawal` | − vendor | Admin-processed Wise payout |
-| `points_expiry` | − customer | Customer balance expired (NOT credited back to vendor) |
+| `points_expiry` | − customer | Customer batch expired — paired with `expired_refund` on the origin vendor (net system effect zero) |
+| `expired_refund` | + vendor | Origin vendor refunded when a customer's points batch expires unredeemed |
 
-Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_vendor_id`, `liability_vendor_id`, `booking_id`, `transaction_id`, `customer_id` for audit and reporting.
+Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_vendor_id`, `liability_vendor_id`, `booking_id`, `transaction_id`, `customer_id` for audit and reporting. `expired_refund` entries additionally carry `batch_id`, `earned_ts`, and `expiry_ts`.
 
 **Transaction ID formats:**
 - `NC0001` — booking (Amelia booking ID, padded)
 - `TU-00001` — vendor top-up
 - `WD-00001` — vendor withdrawal
+- `BATCH-N` — synthetic ID on `expired_refund` rows so vendor history can group them
 
 ---
 
@@ -86,10 +88,12 @@ Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_
 
 | Shortcode | Purpose |
 |-----------|---------|
-| `[mycred_expiring_points]` | Banner showing current balance and expiry date for logged-in customer |
+| `[mycred_expiring_points]` | Banner showing current balance and earliest batch expiry date for logged-in customer |
+| `[nc_my_points]` | Customer-facing points page — balance card + per-batch breakdown (earned date, source vendor, earned/remaining amount, expiry date) with "expires soon" indicator for batches within 30 days |
 | `[nc_vendor_topup_form]` | Vendor-facing top-up submission form (amount, transfer date, Wise reference, proof upload) |
 | `[nc_vendor_withdrawal]` | Vendor-facing withdrawal UI (surplus view, request form, history, calendar window status) |
 | `[nc_vendor_statements]` | Vendor-facing monthly statement list with PDF download |
+| `[nc_vendor_history]` | Vendor-facing transaction history with breakdown popups (includes `expired_refund` rows with refund-context block) |
 | `[wp_now]` | Prints WP-timezone "now" (debug helper) |
 
 ---
@@ -98,15 +102,19 @@ Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_
 
 Top-level menu: **Nation Club** (`dashicons-bank`).
 
+Menu order (top to bottom):
+
 | Submenu | Slug | Purpose |
 |---------|------|---------|
+| Dashboard | `nc-reconciliation` | Live System Health Check + "This Month" rolling check + per-vendor breakdown + month-end snapshot history (paginated) |
 | Top-up Requests | `nation-club` | Review pending vendor top-up submissions; view payment proof; bulk approve/reject/delete |
 | Withdrawal Requests | `nc-withdrawals` | Review withdrawal requests; approve → mark paid with Wise reference; bulk actions |
-| Monthly Statements | `nc-statements` | Generate/regenerate statements; view detail; one-click Finalize & Send Email; manage Shared Costs; bulk actions; cron test buttons |
+| Monthly Statements | `nc-statements` | Generate/regenerate statements; view detail; one-click Finalize & Send Email; manage Shared Costs; bulk actions; cron test buttons (incl. force-run per-batch expiry) |
 | Email Templates | `nc-email-templates` | Tabbed WYSIWYG editor for all 8 email templates (statement, top-up flow, withdrawal flow, top-up reminder, low balance) |
-| Dashboard | `nc-reconciliation` | Live System Health Check + per-vendor breakdown + month-end snapshot history |
+| Expiry Rules | `nc-expiry-rules` | Configure customer points expiry windows (date-only From/To/Expire fields, auto-rolls each January). Master switch to disable expiry entirely. |
 | Settings | `nc-settings` | Withdrawal window, admin notification recipients, Global CC, low-balance threshold |
-| Test Reset | `nc-test-reset` | **TESTING ONLY.** Truncate plugin tables + reset user balances. Remove or gate before production. |
+| Log | `nc-log` | View / download / clear `wp-content/mycred-debug.log` (efficient reverse-seek tail of the last 10,000 lines) |
+| Test Reset | `nc-test-reset` | **TESTING ONLY.** Truncate plugin tables (incl. customer point batches and reconciliation snapshots) + reset user balances. Remove or gate before production. |
 
 Additional admin page:
 - **myCRED → Export Log** — one-click CSV of the full myCRED log with resolved vendor/customer/service/transaction columns.
@@ -118,6 +126,7 @@ Additional admin page:
 - **Reward = % of FULL invoice** (not post-redemption net)
 - **Vendor pool minimum: SGD 1,000** (1 SGD = 1 point)
 - **Vendor pays for loyalty cost ONCE** — at customer's earn time. Cross-vendor redemptions do not double-debit the origin vendor.
+- **Per-batch expiry FIFO** — each earn is a separate batch, expiry tied to source vendor; redemptions consume oldest batches first; expired batches refund the origin vendor (not a permanent loss)
 - **Withdrawals locked** until previous month's statement is Finalized & Sent (NON-NEGOTIABLE spec rule) AND today is within the configured calendar window
 - **Top-ups always available** — no date restriction so vendors can recover dipping balances any time
 - **Statements immutable once Finalized & Sent** — `detail_data` JSON-snapshotted; only Drafts can be regenerated via "Update & Regenerate" on the Shared Costs row
@@ -160,13 +169,17 @@ nation-club-mycred-amelia/
 │   ├── vendor-withdrawal.css / .js # Withdrawal form UI
 │   └── vendor-transactions.css / .js
 ├── includes/
-│   ├── nc_log.php                  # Debug logging helpers (incl. nc_statement_cron_log)
-│   ├── mycred-hooks.php            # Reward / redeem / expiry / log columns / CSV export
-│   ├── vendor-transactions.php     # [nc_vendor_history] shortcode
-│   ├── vendor-pool.php             # Top-up + withdrawal flows + bulk + emails + low-balance check
+│   ├── nc_log.php                  # Debug logging helpers (writes to wp-content/mycred-debug.log)
+│   ├── expiry-rules.php            # Expiry Rules admin page + canonical rule storage + auto-roll + master switch
+│   ├── customer-point-batches.php  # Per-batch table + FIFO consume + daily expiry cron + vendor refund
+│   ├── mycred-hooks.php            # Reward / redeem / batch create / FIFO consume / log columns / CSV export
+│   ├── vendor-transactions.php     # [nc_vendor_history] shortcode (incl. expired_refund context popup)
+│   ├── vendor-pool.php             # Top-up + withdrawal flows + bulk + emails + low-balance check + menu order
 │   ├── vendor-statements.php       # Statements + Email Templates + Settings + cron + reminder
-│   ├── reconciliation.php          # Live dashboard + month-end locked snapshots
-│   └── test-reset.php              # FOR TESTING ONLY — truncate tables + reset balances
+│   ├── reconciliation.php          # Live dashboard + "This Month" check + month-end locked snapshots
+│   ├── customer-points-shortcode.php # [nc_my_points] customer page (balance + per-batch breakdown)
+│   ├── log-viewer.php              # Nation Club → Log admin page (mycred-debug.log viewer/download/clear)
+│   └── test-reset.php              # FOR TESTING ONLY — truncate tables (incl. batches + snapshots) + reset balances
 └── vendor/                         # Composer-managed (not in git)
 ```
 
@@ -180,9 +193,10 @@ nation-club-mycred-amelia/
 | `wp_nc_withdrawal_requests` | Vendor withdrawal requests (pending/approved/paid/rejected) |
 | `wp_nc_statements` | Monthly statement snapshots per vendor (Draft / Finalized & Sent) |
 | `wp_nc_reconciliation_snapshots` | Immutable month-end captures of system health numbers |
+| `wp_nc_customer_point_batches` | Per-customer earn batches (active / fully_redeemed / expired) — drives FIFO redemption + per-vendor expiry |
 | `wp_myCRED_log` | (myCRED's own table) The single source of truth for all balance changes |
 
-All tables are auto-created via `dbDelta` on `plugins_loaded` with versioned options (`nc_vendor_pool_db_version`, `nc_statements_db_version`, `nc_reconciliation_db_version`).
+All tables are auto-created via `dbDelta` on `plugins_loaded` with versioned options (`nc_vendor_pool_db_version`, `nc_statements_db_version`, `nc_reconciliation_db_version`, `nc_batches_db_version`).
 
 ---
 
@@ -190,10 +204,9 @@ All tables are auto-created via `dbDelta` on `plugins_loaded` with versioned opt
 
 | File | Source |
 |------|--------|
-| `wp-content/mycred-debug.log` | `mycred_process_appointment` |
-| `wp-content/uploads/nc-debug.log` | `nc_debug()` |
+| `wp-content/mycred-debug.log` | `nc_debug()` — booking flow, batch create/consume, vendor refunds. Viewable from **Nation Club → Log** (with download / clear buttons). |
 | `wp-content/uploads/nc-expiry-debug.log` | `nc_expiry_debug()` |
-| `wp-content/uploads/nc-statement-cron.log` | Daily cron — statement generation, top-up reminders, snapshot captures |
+| `wp-content/uploads/nc-statement-cron.log` | Daily cron — statement generation, top-up reminders, snapshot captures, per-batch expiry |
 
 For troubleshooting only. Rotate or disable in production.
 
@@ -201,13 +214,14 @@ For troubleshooting only. Rotate or disable in production.
 
 ## Cron schedule
 
-A single daily cron event `nc_statement_daily_cron` (registered on `init`, scheduled for 00:30 site time) drives three handlers:
+A single daily cron event `nc_statement_daily_cron` (registered on `init`, scheduled for 00:30 site time) drives four handlers:
 
 1. **Statement generation** — runs on day 1, generates Draft statements for the previous month for every vendor.
 2. **Top-up reminder** — runs on day 6 and day 7, emails vendors below SGD 1,000.
 3. **Reconciliation snapshot** — runs on day 1, captures a frozen snapshot of the previous month into `wp_nc_reconciliation_snapshots`.
+4. **Per-batch expiry** — runs daily, finds active batches whose `expiry_ts <= now`, debits the customer (`points_expiry`) and refunds the origin vendor (`expired_refund`), marks each batch `expired`.
 
-Manual test buttons for #1 and #2 are on the Monthly Statements page; #3 has a manual capture form on the Reconciliation page.
+Manual test buttons for #1, #2, and #4 are on the Monthly Statements page; #3 has a manual capture form on the Reconciliation page.
 
 > **Note:** WP pseudo-cron only fires when the site receives traffic. For reliable monthly execution, configure a real system cron hitting `wp-cron.php`. WP Engine has built-in real cron support.
 
