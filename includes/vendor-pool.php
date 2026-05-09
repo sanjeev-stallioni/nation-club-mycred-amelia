@@ -752,7 +752,22 @@ function nc_vendor_withdrawal_render( $vendor_id ) {
                 </div>
             <?php endif; ?>
 
-            <?php if ( $has_pending ) : ?>
+            <?php
+            // Pre-check filter blockers at render time so the vendor sees a
+            // clear lockout instead of the form when an external module
+            // (e.g. vendor exit) has blocked withdrawals.
+            $render_block = apply_filters(
+                'nc_vendor_can_withdraw',
+                array( 'ok' => true, 'reason' => '' ),
+                $vendor_id,
+                max( 0.01, (float) $surplus )
+            );
+            ?>
+            <?php if ( empty( $render_block['ok'] ) ) : ?>
+                <div class="nc-notice nc-notice--info">
+                    <strong>Withdrawals locked.</strong> <?php echo esc_html( $render_block['reason'] ); ?>
+                </div>
+            <?php elseif ( $has_pending ) : ?>
                 <div class="nc-notice nc-notice--info">
                     You have a withdrawal request in progress. Please wait for it to be processed before submitting a new one.
                 </div>

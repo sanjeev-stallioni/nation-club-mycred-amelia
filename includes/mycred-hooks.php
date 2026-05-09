@@ -767,52 +767,74 @@ function custom_mycred_add_export_columns($columns)
 add_filter('mycred_log_category', 'custom_mycred_category_column_content', 10, 2);
 function custom_mycred_category_column_content($content, $entry)
 {
+    // Batch-level entries (expiry / refund) aren't tied to a service — show a dash.
+    if (in_array($entry->ref, array('points_expiry', 'expired_refund', 'vendor_topup', 'vendor_withdrawal', 'vendor_exit_settlement'), true)) {
+        return '—';
+    }
+
     $data = maybe_unserialize($entry->data);
     if (is_string($data)) {
         $data = json_decode($data, true);
     }
-    if (is_array($data) && isset($data['service_id'])) {
+    if (is_array($data) && ! empty($data['service_id'])) {
         $service_id = intval($data['service_id']);
         global $wpdb;
         $service = $wpdb->get_var($wpdb->prepare(
             "SELECT name FROM {$wpdb->prefix}amelia_services WHERE id = %d",
             $service_id
         ));
-        return $service ? $service : 'Unknown Service';
+        return $service ? $service : '—';
     }
-    return 'N/A';
+    return '—';
 }
 
 add_filter('mycred_log_points-origin-vendor', 'custom_mycred_points_origin_vendor_column_content', 10, 2);
 function custom_mycred_points_origin_vendor_column_content($content, $entry)
 {
+    // vendor_topup / vendor_withdrawal / vendor_exit_settlement are vendor-self
+    // events — there's no origin vendor distinct from the row's user_id, so dash.
+    if (in_array($entry->ref, array('vendor_topup', 'vendor_withdrawal', 'vendor_exit_settlement'), true)) {
+        return '—';
+    }
 
     $data = maybe_unserialize($entry->data);
     if (is_string($data)) {
         $data = json_decode($data, true);
     }
 
-    // Prefer origin vendor (true source of points)
-    if (is_array($data) && isset($data['origin_vendor_id'])) {
+    // Prefer origin vendor (true source of points). For points_expiry /
+    // expired_refund the relevant column is the liability vendor — use that
+    // so the customer can see which vendor's points expired.
+    if (is_array($data) && ! empty($data['origin_vendor_id'])) {
         $vendor_id = intval($data['origin_vendor_id']);
-    } elseif (is_array($data) && isset($data['vendor_id'])) {
-        // fallback
+        $is_wp_id  = false;
+    } elseif (is_array($data) && ! empty($data['vendor_id'])) {
         $vendor_id = intval($data['vendor_id']);
+        $is_wp_id  = false;
+    } elseif (is_array($data) && ! empty($data['liability_vendor_id'])) {
+        // liability_vendor_id is a WP user_id (set by the batch helper) — not an Amelia provider id.
+        $vendor_id = intval($data['liability_vendor_id']);
+        $is_wp_id  = true;
     } else {
-        return 'N/A';
+        return '—';
     }
 
     global $wpdb;
+    if ($is_wp_id) {
+        $user = get_user_by('id', $vendor_id);
+        return $user ? $user->display_name : '—';
+    }
+
     $vendor = $wpdb->get_row($wpdb->prepare(
-        "SELECT firstName, lastName 
-         FROM {$wpdb->prefix}amelia_users 
+        "SELECT firstName, lastName
+         FROM {$wpdb->prefix}amelia_users
          WHERE id = %d AND type = 'provider'",
         $vendor_id
     ));
 
     return $vendor
         ? trim($vendor->firstName . ' ' . $vendor->lastName)
-        : 'Unknown Vendor';
+        : '—';
 }
 
 

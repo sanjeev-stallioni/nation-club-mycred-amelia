@@ -59,6 +59,8 @@ require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-statements.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/reconciliation.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/customer-points-shortcode.php'; // [nc_my_points] — customer-facing points + batch breakdown
 require_once NC_MYCRE_AMELIA_PATH . 'includes/log-viewer.php';                  // Nation Club → Log
+require_once NC_MYCRE_AMELIA_PATH . 'includes/cancellation-reason.php';         // Required reason modal + customer email + Cancellation Log admin page
+require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-exit.php';                 // Proposal 5 — managed offboarding (notice → hide listing → final settlement)
 require_once NC_MYCRE_AMELIA_PATH . 'includes/test-reset.php'; // FOR TESTING ONLY — remove or gate before production
 
 

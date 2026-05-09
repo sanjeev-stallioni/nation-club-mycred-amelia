@@ -1706,7 +1706,7 @@ define( 'NC_EMAIL_TEMPLATES_OPTION', 'nc_email_templates' );             // new
  * and token list. Single source of truth for the admin UI and the senders.
  */
 function nc_email_template_registry() {
-    return array(
+    $registry = array(
         'statement' => array(
             'label'    => 'Statement Email',
             'audience' => 'vendor',
@@ -1903,6 +1903,10 @@ function nc_email_template_registry() {
             ),
         ),
     );
+
+    // Allow other modules (e.g. cancellation-reason.php) to add their own templates
+    // so the Email Templates admin page picks them up automatically.
+    return apply_filters( 'nc_email_template_registry', $registry );
 }
 
 /**

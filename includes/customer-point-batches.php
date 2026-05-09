@@ -134,11 +134,21 @@ function nc_batch_consume_fifo( $customer_user_id, $amount ) {
         return $consumed;
     }
 
+    $now = current_time( 'timestamp' );
+
+    // Exclude batches whose expiry has already passed — even if the daily
+    // cron hasn't yet run to mark them expired. Closes the window between
+    // the expiry timestamp and the cron tick where a customer could
+    // otherwise redeem points that are officially expired.
     $batches = $wpdb->get_results( $wpdb->prepare(
         "SELECT id, remaining_amount FROM {$table}
-         WHERE customer_user_id = %d AND status = 'active' AND remaining_amount > 0
+         WHERE customer_user_id = %d
+           AND status = 'active'
+           AND remaining_amount > 0
+           AND ( expiry_ts IS NULL OR expiry_ts > %d )
          ORDER BY earned_ts ASC, id ASC",
-        (int) $customer_user_id
+        (int) $customer_user_id,
+        (int) $now
     ) );
 
     foreach ( $batches as $batch ) {

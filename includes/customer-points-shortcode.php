@@ -36,12 +36,41 @@ function nc_my_points_shortcode() {
         $user_id
     ) );
 
+    // Outstanding = points this user (as a vendor) has issued that are still
+    // floating in customer wallets — not yet redeemed and not yet expired.
+    $outstanding = (float) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COALESCE(SUM(remaining_amount), 0)
+         FROM {$table}
+         WHERE liability_vendor_id = %d AND status = 'active' AND remaining_amount > 0",
+        $user_id
+    ) );
+
+    // We show the Outstanding card whenever the user is a vendor (Amelia
+    // provider), even when the current outstanding figure is 0 — this gives
+    // the vendor explicit confirmation that they have no liability hanging.
+    // For regular customers (no provider row), the card stays hidden so
+    // they're not confused by an irrelevant 0.
+    $is_vendor = (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COUNT(*) FROM {$wpdb->prefix}amelia_users WHERE externalId = %d AND type = 'provider'",
+        $user_id
+    ) ) > 0;
+    $show_outstanding = $is_vendor || $outstanding > 0;
+
     ob_start();
     ?>
     <div class="nc-mp-wrap">
-        <div class="nc-mp-balance">
-            <div class="nc-mp-balance__label">Your points balance</div>
-            <div class="nc-mp-balance__value"><?php echo esc_html( number_format( $balance, 2 ) ); ?> <span>pts</span></div>
+        <div class="nc-mp-cards<?php echo $show_outstanding ? ' nc-mp-cards--two' : ''; ?>">
+            <div class="nc-mp-balance">
+                <div class="nc-mp-balance__label">Your current points</div>
+                <div class="nc-mp-balance__value"><?php echo esc_html( number_format( $balance, 2 ) ); ?> <span>pts</span></div>
+            </div>
+            <?php if ( $show_outstanding ) : ?>
+                <div class="nc-mp-balance nc-mp-balance--outstanding">
+                    <div class="nc-mp-balance__label">Outstanding points</div>
+                    <div class="nc-mp-balance__value"><?php echo esc_html( number_format( $outstanding, 2 ) ); ?> <span>pts</span></div>
+                    <div class="nc-mp-balance__sub">Points you issued that customers haven't yet redeemed or expired.</div>
+                </div>
+            <?php endif; ?>
         </div>
 
         <?php if ( empty( $rows ) ) : ?>
@@ -99,13 +128,34 @@ function nc_my_points_shortcode() {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             color: #2c2c2c;
         }
+        .nc-mp-cards {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+        .nc-mp-cards--two {
+            grid-template-columns: 1fr 1fr;
+        }
+        @media (max-width: 600px) {
+            .nc-mp-cards--two { grid-template-columns: 1fr; }
+        }
         .nc-mp-balance {
             background: linear-gradient(135deg, #8b1c3b 0%, #6b1530 100%);
             color: #fff;
             padding: 22px 24px;
             border-radius: 10px;
             box-shadow: 0 2px 8px rgba(139, 28, 59, 0.18);
-            margin-bottom: 18px;
+        }
+        .nc-mp-balance--outstanding {
+            background: linear-gradient(135deg, #4a4a4a 0%, #2c2c2c 100%);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+        }
+        .nc-mp-balance__sub {
+            font-size: 12px;
+            opacity: 0.8;
+            margin-top: 8px;
+            line-height: 1.4;
         }
         .nc-mp-balance__label {
             font-size: 12px;

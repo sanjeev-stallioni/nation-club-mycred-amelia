@@ -21,9 +21,12 @@ Custom WordPress plugin that integrates [myCRED](https://mycred.me/) with [Ameli
 9. **Event-based low-balance alert.** When a vendor's balance crosses below a configurable threshold (default SGD 300) — e.g. after a customer redemption settlement — they receive a one-time alert. The flag clears the moment they recover above the threshold.
 10. **Real-time Reconciliation Dashboard.** Live "System Health Check" — Total Vendor Pool, Total Customer Points, System Total, Expected Total (top-ups − withdrawals), Balanced/Mismatch banner with delta. Auto-refreshes every 30 seconds. Per-vendor balance breakdown (paginated) highlights vendors below minimum or at zero. Includes a "This Month" rolling check section that compares this month's activity against the prior month's snapshot to help pinpoint when a discrepancy started.
 11. **Month-end locked snapshots.** Auto-captured on the 1st of each month into an immutable history table (paginated), providing the official frozen accounting record separate from the live view. Past-month captures back-calculate from current state minus post-cutoff log entries so historical snapshots reflect month-end state, not current state.
-12. **Per-batch expiry with origin-vendor refund.** Each customer earn becomes its own batch, tracked with its own expiry date and source vendor. New earns from one vendor never extend the expiry of points from another vendor. Redemptions consume FIFO (oldest batches first). When a batch expires: customer is debited (`points_expiry`) AND the origin vendor is refunded the equivalent points (`expired_refund`) — net system effect zero, vendor's funded value released back to their pool. Expiry windows are configurable from **Nation Club → Expiry Rules** (date-only inputs; auto-rolls each January). Master switch can disable expiry entirely.
-13. **Employee-panel visibility.** In Amelia's employee panel, opening a customer row shows their myCRED balance and last service *with the current vendor* (not global).
-14. **Log columns & export.** Adds Vendor Name, Username, Service, Transaction ID, and Origin Vendor columns to the myCRED log. One-click CSV download of the full ledger.
+12. **Per-batch expiry with origin-vendor refund.** Each customer earn becomes its own batch, tracked with its own expiry date and source vendor. New earns from one vendor never extend the expiry of points from another vendor. Redemptions consume FIFO (oldest batches first). When a batch expires: customer is debited (`points_expiry`) AND the origin vendor is refunded the equivalent points (`expired_refund`) — net system effect zero, vendor's funded value released back to their pool. The FIFO consumer also excludes expired batches the moment their `expiry_ts` passes, even before the daily cron runs (no "free 30-minute extension" loophole). Expiry windows are configurable from **Nation Club → Expiry Rules** (date-only inputs; auto-rolls each January). Master switch can disable expiry entirely.
+13. **Outstanding Points card on vendor portal.** `[nc_my_points]` shows two side-by-side cards for vendors: **Your Current Points** (pool balance) and **Outstanding Points** (sum of `remaining_amount` across active batches where the vendor is the liability). Always visible for Amelia providers — even at 0 — so vendors get explicit "no liability hanging" confirmation. Hidden for non-provider customers.
+14. **Cancellation / Rejection reasons (Amelia enhancement).** When a vendor changes a customer booking's status to Canceled or Rejected in the Amelia employee panel, a modal appears requiring them to enter a reason before the save proceeds. The customer is then emailed (template editable in Email Templates admin) with the reason embedded. To avoid duplicate emails, **disable Amelia's default Customer Cancelled / Customer Rejected notifications** in Amelia → Notifications. The canceled booking row in `wp_amelia_customer_bookings` is auto-deleted after the reason is saved — this prevents Amelia's "Maximum capacity reached" 409 errors when the customer rebooks the same time slot (the original cancellation history is preserved in our log table). All reasons are logged at **Nation Club → Cancellation Log** for admin review; re-cancellation of the same booking refreshes the row's timestamp and re-fires the email.
+15. **Vendor exit flow (Proposal 5).** Two-month managed offboarding. Admin starts an exit notice → vendor continues operating normally during the notice → after 2 months admin clicks "Hide Listing" (gated by SGD 1,000 minimum balance check on the last day, per client requirement) which removes the vendor from the booking page while their account stays active for statement access → outstanding points clear via redemption or expiry → admin clicks "Final Settlement" with a Wise reference and the remaining pool balance is refunded via a `vendor_exit_settlement` ledger entry. Withdrawals are blocked once listing is hidden (both at form-submit time via filter AND at form-render time, so the vendor sees a clear "Withdrawals locked" notice instead of the form) — only Final Settlement can move money out post-hide. **Rejoin** button on settled rows restores Amelia visibility in one click; vendor still tops up to SGD 1,000 via the normal portal flow before resuming bookings. All flows on **Nation Club → Vendor Exits**.
+16. **Employee-panel visibility.** In Amelia's employee panel, opening a customer row shows their myCRED balance and last service *with the current vendor* (not global).
+17. **Log columns & export.** Adds Vendor Name, Username, Service, Transaction ID, and Origin Vendor columns to the myCRED log. One-click CSV download of the full ledger. Batch-level entries (`points_expiry`, `expired_refund`, `vendor_topup`, `vendor_withdrawal`, `vendor_exit_settlement`) display "—" for service/vendor columns instead of "Unknown Service" / "N/A" since they're not tied to a service. `points_expiry` and `expired_refund` rows resolve the vendor name from `liability_vendor_id` so the customer can see which vendor's points expired.
 
 ---
 
@@ -73,6 +76,7 @@ Services not listed fall back to **5%**.
 | `vendor_withdrawal` | − vendor | Admin-processed Wise payout |
 | `points_expiry` | − customer | Customer batch expired — paired with `expired_refund` on the origin vendor (net system effect zero) |
 | `expired_refund` | + vendor | Origin vendor refunded when a customer's points batch expires unredeemed |
+| `vendor_exit_settlement` | − vendor | Final pool refund on managed vendor exit (Wise reference recorded in the JSON `data` payload) |
 
 Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_vendor_id`, `liability_vendor_id`, `booking_id`, `transaction_id`, `customer_id` for audit and reporting. `expired_refund` entries additionally carry `batch_id`, `earned_ts`, and `expiry_ts`.
 
@@ -81,6 +85,7 @@ Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_
 - `TU-00001` — vendor top-up
 - `WD-00001` — vendor withdrawal
 - `BATCH-N` — synthetic ID on `expired_refund` rows so vendor history can group them
+- `EXIT-00001` — vendor exit final settlement
 
 ---
 
@@ -114,6 +119,8 @@ Menu order (top to bottom):
 | Expiry Rules | `nc-expiry-rules` | Configure customer points expiry windows (date-only From/To/Expire fields, auto-rolls each January). Master switch to disable expiry entirely. |
 | Settings | `nc-settings` | Withdrawal window, admin notification recipients, Global CC, low-balance threshold |
 | Log | `nc-log` | View / download / clear `wp-content/mycred-debug.log` (efficient reverse-seek tail of the last 10,000 lines) |
+| Cancellation Log | `nc-cancellation-log` | All canceled / rejected bookings with the vendor-supplied reason and customer-email status. Paginated. Each entry preserves customer + service + appointment + reason even after the underlying Amelia booking row is auto-deleted. |
+| Vendor Exits | `nc-vendor-exits` | Two-month managed offboarding: start exit notice, hide listing once minimum balance is met, finalize settlement with Wise reference once outstanding points clear. Includes per-row **Rejoin** action on settled rows to restore Amelia visibility in one click. |
 | Test Reset | `nc-test-reset` | **TESTING ONLY.** Truncate plugin tables (incl. customer point batches and reconciliation snapshots) + reset user balances. Remove or gate before production. |
 
 Additional admin page:
@@ -177,8 +184,10 @@ nation-club-mycred-amelia/
 │   ├── vendor-pool.php             # Top-up + withdrawal flows + bulk + emails + low-balance check + menu order
 │   ├── vendor-statements.php       # Statements + Email Templates + Settings + cron + reminder
 │   ├── reconciliation.php          # Live dashboard + "This Month" check + month-end locked snapshots
-│   ├── customer-points-shortcode.php # [nc_my_points] customer page (balance + per-batch breakdown)
+│   ├── customer-points-shortcode.php # [nc_my_points] customer/vendor page (balance + outstanding card + per-batch breakdown)
 │   ├── log-viewer.php              # Nation Club → Log admin page (mycred-debug.log viewer/download/clear)
+│   ├── cancellation-reason.php     # Required-reason modal + customer email + Cancellation Log admin page
+│   ├── vendor-exit.php             # Vendor Exit Flow (Proposal 5) — notice → hide listing → final settlement
 │   └── test-reset.php              # FOR TESTING ONLY — truncate tables (incl. batches + snapshots) + reset balances
 └── vendor/                         # Composer-managed (not in git)
 ```
@@ -194,9 +203,11 @@ nation-club-mycred-amelia/
 | `wp_nc_statements` | Monthly statement snapshots per vendor (Draft / Finalized & Sent) |
 | `wp_nc_reconciliation_snapshots` | Immutable month-end captures of system health numbers |
 | `wp_nc_customer_point_batches` | Per-customer earn batches (active / fully_redeemed / expired) — drives FIFO redemption + per-vendor expiry |
+| `wp_nc_appointment_reasons` | Cancellation / rejection reasons captured from the Amelia employee panel modal (one row per booking + status) |
+| `wp_nc_vendor_exits` | Vendor exit flow lifecycle (notice_active / listing_hidden / settled) with notice dates, Amelia status snapshot, final settlement amount + Wise reference, plus optional `rejoined_at` / `rejoined_by` stamp if the vendor rejoined later (row stays as `settled` so original exit history is preserved) |
 | `wp_myCRED_log` | (myCRED's own table) The single source of truth for all balance changes |
 
-All tables are auto-created via `dbDelta` on `plugins_loaded` with versioned options (`nc_vendor_pool_db_version`, `nc_statements_db_version`, `nc_reconciliation_db_version`, `nc_batches_db_version`).
+All tables are auto-created via `dbDelta` on `plugins_loaded` with versioned options (`nc_vendor_pool_db_version`, `nc_statements_db_version`, `nc_reconciliation_db_version`, `nc_batches_db_version`, `nc_cancellation_db_version`, `nc_vendor_exit_db_version`).
 
 ---
 
@@ -229,10 +240,15 @@ Manual test buttons for #1, #2, and #4 are on the Monthly Statements page; #3 ha
 
 ## Roadmap
 
-**Pending:**
-- **Vendor exit flow (2-month notice)** — *blocked on client clarifications.* Vendor submits exit notice, status flips to Non-Participating, no new points issued for their services, final settlement after points expiry cycle, refund within 30 business days. Awaiting answers on submission UX, 6-month minimum enforcement, withdrawal during notice, final-settlement page location, Wise fees entry, cancel-notice window, and account closure handling.
+**Done:**
+- Per-batch expiry with origin-vendor refund (replaces the older "expiry is a permanent vendor loss" model)
+- Outstanding Points card on vendor portal
+- Cancellation / rejection reason capture + customer email + admin log + auto-cleanup of canceled Amelia bookings
+- Vendor exit flow (Proposal 5) — three-step status workflow with Rejoin support
 
-After that: polish/edge cases only.
+**Pending (deferred / not blocking):**
+- Admin-initiated top-up — onboard new vendors with the SGD 1,000 seed without requiring vendor login first
+- Cleanup tool for legacy stale canceled bookings predating the auto-cleanup feature
 
 ---
 
