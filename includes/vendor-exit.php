@@ -36,7 +36,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'NC_VENDOR_EXIT_DB_VERSION', '1.1.0' );
+define( 'NC_VENDOR_EXIT_DB_VERSION', '1.2.0' );
 define( 'NC_VENDOR_EXIT_NOTICE_MONTHS', 2 );
 
 /* -------------------------------------------------------------------------
@@ -71,6 +71,7 @@ function nc_vendor_exit_install() {
         final_settlement_wise_ref VARCHAR(191) DEFAULT NULL,
         rejoined_at DATETIME DEFAULT NULL,
         rejoined_by BIGINT UNSIGNED DEFAULT NULL,
+        last_day_email_sent_at DATETIME DEFAULT NULL,
         admin_note TEXT DEFAULT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -506,6 +507,15 @@ function nc_vendor_exit_render_admin_page() {
         <h2 class="title">Start a new exit notice</h2>
         <?php nc_vendor_exit_render_start_form(); ?>
 
+        <p style="margin-top:14px">
+            <strong>Test cron:</strong>
+            <form method="post" style="display:inline">
+                <?php wp_nonce_field( 'nc_exit_test_last_day_email' ); ?>
+                <input type="hidden" name="nc_exit_action" value="run_last_day_email">
+                <button type="submit" class="button" onclick="return confirm('Force-run the last-day email cron now? Any active exit whose notice_end_date matches today and has not yet been emailed will receive the reminder.');">Run Last-Day Email Cron (Test)</button>
+            </form>
+        </p>
+
         <h2 class="title" style="margin-top:30px">Active &amp; recent exits</h2>
         <?php if ( empty( $rows ) ) : ?>
             <p><em>No vendor exits recorded.</em></p>
@@ -734,6 +744,15 @@ function nc_vendor_exit_handle_post() {
         $res = nc_vendor_exit_rejoin( $exit_id, $admin_id );
         nc_vendor_exit_redirect( $res );
     }
+
+    if ( $action === 'run_last_day_email' ) {
+        check_admin_referer( 'nc_exit_test_last_day_email' );
+        nc_vendor_exit_last_day_email_handler();
+        nc_vendor_exit_redirect( array(
+            'ok'      => true,
+            'message' => 'Last-day email cron run forced. Check Nation Club → Log for results.',
+        ) );
+    }
 }
 
 function nc_vendor_exit_redirect( $res ) {
@@ -745,4 +764,119 @@ function nc_vendor_exit_redirect( $res ) {
     }
     wp_safe_redirect( $url );
     exit;
+}
+
+/* -------------------------------------------------------------------------
+ * 5. Last-day email reminder
+ *
+ * Hooks onto the shared daily cron (nc_statement_daily_cron). For each exit
+ * in notice_active status whose notice_end_date matches today, sends the
+ * vendor a heads-up email — reminds them to top up to SGD 1,000 if their
+ * pool is below, and notes the outstanding points that will be refunded
+ * after account closure. Stamped with last_day_email_sent_at for idempotency.
+ *
+ * Template is editable from Nation Club → Email Templates.
+ * ----------------------------------------------------------------------- */
+
+add_filter( 'nc_email_template_registry', 'nc_vendor_exit_register_email_template' );
+
+function nc_vendor_exit_register_email_template( $registry ) {
+    $registry['vendor_exit_last_day'] = array(
+        'label'    => 'Vendor Exit — Last Day Reminder (vendor)',
+        'audience' => 'vendor',
+        'tokens'   => array(
+            '{vendor_name}'        => 'Vendor display name',
+            '{notice_start}'       => 'Notice period start date',
+            '{notice_end}'         => 'Notice period end date (= today)',
+            '{pool_balance}'       => 'Current vendor pool balance (SGD)',
+            '{required_minimum}'   => 'Required minimum balance (SGD 1,000)',
+            '{topup_required}'     => 'Amount needed to reach the minimum (SGD)',
+            '{outstanding_points}' => 'Points still in customer wallets (refundable after they clear)',
+            '{site_name}'          => 'WordPress site name',
+        ),
+        'defaults' => array(
+            'subject' => 'Final day of your Nation Club notice period',
+            'body'    => "Dear {vendor_name},\n\n" .
+                         "Today ({notice_end}) is the last day of your 2-month notice period with Nation Club. Thank you for being part of our platform.\n\n" .
+                         "**Account status**\n" .
+                         "• Notice period: {notice_start} → {notice_end}\n" .
+                         "• Current pool balance: SGD {pool_balance}\n" .
+                         "• Required minimum: SGD {required_minimum}\n" .
+                         "• Top-up required to reach minimum: SGD {topup_required}\n" .
+                         "• Outstanding points still in customer wallets: {outstanding_points}\n\n" .
+                         "If your pool balance is below SGD {required_minimum}, please top up the difference (SGD {topup_required}) via the vendor portal today so we can proceed with closing your account in good standing.\n\n" .
+                         "Any outstanding points still held by customers will clear over the coming weeks through redemption or expiry. Once they reach zero, your remaining pool balance will be refunded to your Wise account.\n\n" .
+                         "If you have any questions or want to reconsider, please contact us before end of day.\n\n" .
+                         "Regards,\n{site_name}",
+        ),
+    );
+    return $registry;
+}
+
+add_action( 'nc_statement_daily_cron', 'nc_vendor_exit_last_day_email_handler' );
+
+function nc_vendor_exit_last_day_email_handler() {
+    if ( ! function_exists( 'nc_email_send' ) ) {
+        return;
+    }
+
+    global $wpdb;
+    $table = nc_vendor_exit_table();
+    $today = wp_date( 'Y-m-d' );
+
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        "SELECT * FROM {$table}
+         WHERE status = 'notice_active'
+           AND notice_end_date = %s
+           AND last_day_email_sent_at IS NULL",
+        $today
+    ) );
+
+    if ( empty( $rows ) ) {
+        if ( function_exists( 'nc_statement_cron_log' ) ) {
+            nc_statement_cron_log( '--- Vendor exit last-day email: no exits ending today ---' );
+        }
+        return;
+    }
+
+    if ( function_exists( 'nc_statement_cron_log' ) ) {
+        nc_statement_cron_log( '--- Vendor exit last-day email: ' . count( $rows ) . ' vendor(s) ---' );
+    }
+
+    $min = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? NC_VENDOR_POOL_MIN_BALANCE : 1000;
+
+    foreach ( $rows as $r ) {
+        $vendor = get_user_by( 'id', (int) $r->vendor_id );
+        if ( ! $vendor || ! is_email( $vendor->user_email ) ) {
+            continue;
+        }
+
+        $balance      = nc_vendor_exit_pool_balance( $r->vendor_id );
+        $outstanding  = nc_vendor_exit_outstanding_points( $r->vendor_id );
+        $topup_needed = max( 0, round( $min - $balance, 2 ) );
+
+        $tokens = array(
+            '{vendor_name}'        => $vendor->display_name,
+            '{notice_start}'       => wp_date( 'F j, Y', strtotime( $r->notice_start_date ) ),
+            '{notice_end}'         => wp_date( 'F j, Y', strtotime( $r->notice_end_date ) ),
+            '{pool_balance}'       => number_format( $balance, 2 ),
+            '{required_minimum}'   => number_format( $min, 2 ),
+            '{topup_required}'     => number_format( $topup_needed, 2 ),
+            '{outstanding_points}' => number_format( $outstanding, 2 ),
+            '{site_name}'          => get_bloginfo( 'name' ),
+        );
+
+        $sent = nc_email_send( 'vendor_exit_last_day', $vendor->user_email, $tokens );
+
+        if ( $sent ) {
+            $wpdb->update( $table, array( 'last_day_email_sent_at' => current_time( 'mysql' ) ), array( 'id' => (int) $r->id ) );
+            if ( function_exists( 'nc_statement_cron_log' ) ) {
+                nc_statement_cron_log( "  OK   — sent to {$vendor->user_email} (vendor {$r->vendor_id}, exit {$r->id})" );
+            }
+        } else {
+            if ( function_exists( 'nc_statement_cron_log' ) ) {
+                nc_statement_cron_log( "  FAIL — could not send to {$vendor->user_email} (vendor {$r->vendor_id})" );
+            }
+        }
+    }
 }
