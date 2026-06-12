@@ -332,7 +332,17 @@ function nc_vendor_exit_finalize( $exit_id, $wise_reference, $admin_id ) {
     }
 
     $balance = nc_vendor_exit_pool_balance( $row->vendor_id );
-    if ( $balance > 0 && function_exists( 'mycred_add' ) ) {
+
+    // Only attempt a debit if there's something to debit. If balance == 0
+    // we still mark the exit as settled (nothing to refund — valid case).
+    if ( $balance > 0 ) {
+        if ( ! function_exists( 'mycred_add' ) ) {
+            return array(
+                'ok'      => false,
+                'message' => 'myCRED is not available — cannot debit vendor pool. Settlement not completed; please retry once myCRED is active.',
+            );
+        }
+
         $log_data = wp_json_encode( array(
             'transaction_id'  => 'EXIT-' . str_pad( (string) $row->id, 5, '0', STR_PAD_LEFT ),
             'exit_id'         => (int) $row->id,
@@ -340,7 +350,8 @@ function nc_vendor_exit_finalize( $exit_id, $wise_reference, $admin_id ) {
             'wise_reference'  => $wise,
             'admin_id'        => (int) $admin_id,
         ) );
-        mycred_add(
+
+        $debit_ok = mycred_add(
             'vendor_exit_settlement',
             (int) $row->vendor_id,
             -$balance,
@@ -348,6 +359,16 @@ function nc_vendor_exit_finalize( $exit_id, $wise_reference, $admin_id ) {
             (int) $row->id,
             $log_data
         );
+
+        if ( ! $debit_ok ) {
+            return array(
+                'ok'      => false,
+                'message' => sprintf(
+                    'Failed to debit vendor pool by SGD %s. Settlement not completed — exit remains in Listing Hidden status so you can retry.',
+                    number_format( $balance, 2 )
+                ),
+            );
+        }
     }
 
     $wpdb->update( $table, array(
