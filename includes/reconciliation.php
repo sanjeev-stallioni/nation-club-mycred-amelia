@@ -13,7 +13,12 @@
  *   - Total Top-ups           = sum of vendor_topup ledger entries
  *   - Total Withdrawals       = sum of vendor_withdrawal entries (abs)
  *   - Total Expired           = sum of points_expiry entries (abs)
- *   - Expected Total          = topups − withdrawals
+ *   - Same-Vendor Absorbed    = cumulative cleared_amount on same_vendor_clear
+ *                               rows. Customer points were redeemed without a
+ *                               vendor credit, so System Total drops by this
+ *                               amount over time — must be subtracted from
+ *                               Expected to keep delta near zero.
+ *   - Expected Total          = topups − withdrawals − same-vendor absorbed
  *                               (expired now refunds vendor → net 0 in System)
  *   - Status                  = Balanced / Mismatch (delta)
  *
@@ -31,7 +36,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'NC_RECONCILIATION_DB_VERSION', '1.0.0' );
+define( 'NC_RECONCILIATION_DB_VERSION', '1.2.0' );
 
 /* -------------------------------------------------------------------------
  * 0. Schema — month-end snapshots
@@ -57,7 +62,9 @@ function nc_reconciliation_snapshots_install() {
         system_total DECIMAL(14,2) NOT NULL DEFAULT 0,
         total_topups DECIMAL(14,2) NOT NULL DEFAULT 0,
         total_withdrawals DECIMAL(14,2) NOT NULL DEFAULT 0,
+        total_exit_settlements DECIMAL(14,2) NOT NULL DEFAULT 0,
         total_expired DECIMAL(14,2) NOT NULL DEFAULT 0,
+        same_vendor_absorbed DECIMAL(14,2) NOT NULL DEFAULT 0,
         expected_total DECIMAL(14,2) NOT NULL DEFAULT 0,
         delta DECIMAL(14,2) NOT NULL DEFAULT 0,
         balanced TINYINT(1) NOT NULL DEFAULT 0,
@@ -83,6 +90,44 @@ add_action( 'plugins_loaded', function () {
  * ----------------------------------------------------------------------- */
 
 /**
+ * Sum the cumulative same-vendor "loyalty absorbed" amount from the ledger.
+ *
+ * `same_vendor_clear` rows carry creds=0 (no balance impact) but the cleared
+ * point count is stamped in data.cleared_amount. Cumulative absorption needs
+ * to be subtracted from Expected Total so the dashboard stays balanced — the
+ * customer side of those redemptions consumed points without a matching
+ * vendor credit, which is intentional but creates a real System Total drift.
+ *
+ * @param int|null $start_ts Inclusive lower bound (null = no lower bound)
+ * @param int|null $end_ts   Exclusive upper bound (null = no upper bound)
+ * @return float
+ */
+function nc_reconciliation_sum_same_vendor_absorbed( $start_ts = null, $end_ts = null ) {
+    global $wpdb;
+    $log_tbl = $wpdb->prefix . 'myCRED_log';
+
+    $sql  = "SELECT COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(data, '$.cleared_amount')) AS DECIMAL(14,2))), 0)
+             FROM {$log_tbl}
+             WHERE ref = 'same_vendor_clear'";
+    $args = array();
+
+    if ( $start_ts !== null ) {
+        $sql   .= ' AND time >= %d';
+        $args[] = (int) $start_ts;
+    }
+    if ( $end_ts !== null ) {
+        $sql   .= ' AND time < %d';
+        $args[] = (int) $end_ts;
+    }
+
+    $value = empty( $args )
+        ? $wpdb->get_var( $sql )
+        : $wpdb->get_var( $wpdb->prepare( $sql, $args ) );
+
+    return (float) $value;
+}
+
+/**
  * Compute the live reconciliation snapshot.
  *
  * @return array{
@@ -92,6 +137,7 @@ add_action( 'plugins_loaded', function () {
  *   total_topups: float,
  *   total_withdrawals: float,
  *   total_expired: float,
+ *   same_vendor_absorbed: float,
  *   expected_total: float,
  *   delta: float,
  *   balanced: bool,
@@ -142,6 +188,13 @@ function nc_reconciliation_calculate() {
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'vendor_withdrawal'"
     ) );
 
+    // Vendor exit final settlements — money physically paid to leaving vendors
+    // via Wise. Like withdrawals, this is real outflow that drops System Total,
+    // so it must be subtracted from Expected to keep the dashboard Balanced.
+    $total_exit_settlements = abs( (float) $wpdb->get_var(
+        "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'vendor_exit_settlement'"
+    ) );
+
     // Customer points expired (per-batch system: customer −X, origin vendor +X
     // via expired_refund — System Total unchanged, so we don't subtract it
     // from Expected). Surfaced for transparency in the breakdown only.
@@ -149,25 +202,35 @@ function nc_reconciliation_calculate() {
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'points_expiry'"
     ) );
 
-    // Expected = real money in, less money out. Expiry now refunds the origin
-    // vendor (expired_refund), so the customer-side debit is matched by a
-    // vendor-side credit — net change to System Total is zero.
-    $expected_total = $total_topups - $total_withdrawals;
+    // Same-vendor loyalty absorbed — cumulative cleared_amount across all
+    // same_vendor_clear rows. These redemptions reduce customer points without
+    // a matching vendor credit, so System Total drops by this amount over
+    // time. Subtract from Expected so delta stays near zero in a healthy
+    // system; the absorbed value is surfaced separately for transparency.
+    $same_vendor_absorbed = nc_reconciliation_sum_same_vendor_absorbed();
+
+    // Expected = real money in, less money out (withdrawals + exit settlements),
+    // less loyalty absorbed by vendors via same-vendor redemptions. Expiry now
+    // refunds the origin vendor (expired_refund), so the customer-side debit
+    // is matched by a vendor-side credit — net change to System Total is zero.
+    $expected_total = $total_topups - $total_withdrawals - $total_exit_settlements - $same_vendor_absorbed;
 
     $delta    = round( $system_total - $expected_total, 2 );
     $balanced = abs( $delta ) < 0.01;
 
     return array(
-        'vendor_pool'       => round( $vendor_pool, 2 ),
-        'customer_points'   => round( $customer_points, 2 ),
-        'system_total'      => round( $system_total, 2 ),
-        'total_topups'      => round( $total_topups, 2 ),
-        'total_withdrawals' => round( $total_withdrawals, 2 ),
-        'total_expired'     => round( $total_expired, 2 ),
-        'expected_total'    => round( $expected_total, 2 ),
-        'delta'             => $delta,
-        'balanced'          => $balanced,
-        'as_of'             => current_time( 'mysql' ),
+        'vendor_pool'            => round( $vendor_pool, 2 ),
+        'customer_points'        => round( $customer_points, 2 ),
+        'system_total'           => round( $system_total, 2 ),
+        'total_topups'           => round( $total_topups, 2 ),
+        'total_withdrawals'      => round( $total_withdrawals, 2 ),
+        'total_exit_settlements' => round( $total_exit_settlements, 2 ),
+        'total_expired'          => round( $total_expired, 2 ),
+        'same_vendor_absorbed'   => round( $same_vendor_absorbed, 2 ),
+        'expected_total'         => round( $expected_total, 2 ),
+        'delta'                  => $delta,
+        'balanced'               => $balanced,
+        'as_of'                  => current_time( 'mysql' ),
     );
 }
 
@@ -243,27 +306,36 @@ function nc_reconciliation_calculate_as_of( $cutoff_ts ) {
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'vendor_withdrawal' AND time < %d",
         $cutoff_ts
     ) ) );
+    $total_exit_settlements = abs( (float) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'vendor_exit_settlement' AND time < %d",
+        $cutoff_ts
+    ) ) );
     $total_expired = abs( (float) $wpdb->get_var( $wpdb->prepare(
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl} WHERE ref = 'points_expiry' AND time < %d",
         $cutoff_ts
     ) ) );
 
+    // Cumulative same-vendor absorbed up to the cutoff.
+    $same_vendor_absorbed = nc_reconciliation_sum_same_vendor_absorbed( null, $cutoff_ts );
+
     // Same formula as live calc: expiry refunds vendor → net 0 → not subtracted.
-    $expected_total = $total_topups - $total_withdrawals;
+    $expected_total = $total_topups - $total_withdrawals - $total_exit_settlements - $same_vendor_absorbed;
     $delta          = round( $system_total - $expected_total, 2 );
     $balanced       = abs( $delta ) < 0.01;
 
     return array(
-        'vendor_pool'       => round( $vendor_pool, 2 ),
-        'customer_points'   => round( $customer_points, 2 ),
-        'system_total'      => round( $system_total, 2 ),
-        'total_topups'      => round( $total_topups, 2 ),
-        'total_withdrawals' => round( $total_withdrawals, 2 ),
-        'total_expired'     => round( $total_expired, 2 ),
-        'expected_total'    => round( $expected_total, 2 ),
-        'delta'             => $delta,
-        'balanced'          => $balanced,
-        'as_of'             => current_time( 'mysql' ),
+        'vendor_pool'            => round( $vendor_pool, 2 ),
+        'customer_points'        => round( $customer_points, 2 ),
+        'system_total'           => round( $system_total, 2 ),
+        'total_topups'           => round( $total_topups, 2 ),
+        'total_withdrawals'      => round( $total_withdrawals, 2 ),
+        'total_exit_settlements' => round( $total_exit_settlements, 2 ),
+        'total_expired'          => round( $total_expired, 2 ),
+        'same_vendor_absorbed'   => round( $same_vendor_absorbed, 2 ),
+        'expected_total'         => round( $expected_total, 2 ),
+        'delta'                => $delta,
+        'balanced'             => $balanced,
+        'as_of'                => current_time( 'mysql' ),
     );
 }
 
@@ -323,15 +395,27 @@ function nc_reconciliation_calculate_this_month() {
         $start_ts, $end_ts
     ) ) );
 
+    $exit_settlements = abs( (float) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl}
+         WHERE ref = 'vendor_exit_settlement' AND time >= %d AND time < %d",
+        $start_ts, $end_ts
+    ) ) );
+
     $expired = abs( (float) $wpdb->get_var( $wpdb->prepare(
         "SELECT COALESCE(SUM(creds), 0) FROM {$log_tbl}
          WHERE ref = 'points_expiry' AND time >= %d AND time < %d",
         $start_ts, $end_ts
     ) ) );
 
+    // Same-vendor loyalty absorbed THIS month (cleared_amount on rows in window)
+    $absorbed = nc_reconciliation_sum_same_vendor_absorbed( $start_ts, $end_ts );
+
     // Expiry now refunds vendor pool (expired_refund), so customer-side
     // debit is matched by vendor-side credit — net 0 on System Total.
-    $expected_now = $initial + $topups - $withdrawals;
+    // Same-vendor absorbed and exit settlements both reduce System Total
+    // without an offsetting credit elsewhere, so subtract them from Expected
+    // to keep the delta near zero in a healthy system.
+    $expected_now = $initial + $topups - $withdrawals - $exit_settlements - $absorbed;
 
     // Reuse the lifetime calc for the "actual now" number
     $live       = nc_reconciliation_calculate();
@@ -341,18 +425,20 @@ function nc_reconciliation_calculate_this_month() {
     $balanced = abs( $delta ) < 0.01;
 
     return array(
-        'month'           => $month_str,
-        'month_label'     => $month_label,
-        'month_start'     => $month_start_dt->format( 'Y-m-d H:i:s' ),
-        'prev_month'      => $prev_month_str,
-        'initial'         => round( $initial, 2 ),
-        'initial_source'  => $initial_source, // 'snapshot' | 'genesis'
-        'topups'          => round( $topups, 2 ),
-        'withdrawals'     => round( $withdrawals, 2 ),
-        'expired'         => round( $expired, 2 ),
-        'expected_now'    => round( $expected_now, 2 ),
-        'actual_now'      => round( $actual_now, 2 ),
-        'delta'           => $delta,
+        'month'            => $month_str,
+        'month_label'      => $month_label,
+        'month_start'      => $month_start_dt->format( 'Y-m-d H:i:s' ),
+        'prev_month'       => $prev_month_str,
+        'initial'          => round( $initial, 2 ),
+        'initial_source'   => $initial_source, // 'snapshot' | 'genesis'
+        'topups'           => round( $topups, 2 ),
+        'withdrawals'      => round( $withdrawals, 2 ),
+        'exit_settlements' => round( $exit_settlements, 2 ),
+        'expired'          => round( $expired, 2 ),
+        'absorbed'         => round( $absorbed, 2 ),
+        'expected_now'     => round( $expected_now, 2 ),
+        'actual_now'       => round( $actual_now, 2 ),
+        'delta'            => $delta,
         'balanced'        => $balanced,
     );
 }
@@ -396,19 +482,21 @@ function nc_reconciliation_capture_snapshot( $month, $captured_by = 0, $notes = 
     $r = nc_reconciliation_calculate_as_of( $cutoff_ts );
 
     $insert = array(
-        'snapshot_month'    => $month,
-        'vendor_pool'       => $r['vendor_pool'],
-        'customer_points'   => $r['customer_points'],
-        'system_total'      => $r['system_total'],
-        'total_topups'      => $r['total_topups'],
-        'total_withdrawals' => $r['total_withdrawals'],
-        'total_expired'     => $r['total_expired'],
-        'expected_total'    => $r['expected_total'],
-        'delta'             => $r['delta'],
-        'balanced'          => $r['balanced'] ? 1 : 0,
-        'captured_at'       => current_time( 'mysql' ),
-        'captured_by'       => (int) $captured_by,
-        'notes'             => $notes ?: null,
+        'snapshot_month'         => $month,
+        'vendor_pool'            => $r['vendor_pool'],
+        'customer_points'        => $r['customer_points'],
+        'system_total'           => $r['system_total'],
+        'total_topups'           => $r['total_topups'],
+        'total_withdrawals'      => $r['total_withdrawals'],
+        'total_exit_settlements' => $r['total_exit_settlements'],
+        'total_expired'          => $r['total_expired'],
+        'same_vendor_absorbed'   => $r['same_vendor_absorbed'],
+        'expected_total'         => $r['expected_total'],
+        'delta'                  => $r['delta'],
+        'balanced'               => $r['balanced'] ? 1 : 0,
+        'captured_at'            => current_time( 'mysql' ),
+        'captured_by'            => (int) $captured_by,
+        'notes'                  => $notes ?: null,
     );
 
     $ok = $wpdb->insert( $table, $insert );
@@ -715,6 +803,14 @@ function nc_admin_reconciliation_page() {
                         <td>− Withdrawals paid out this month</td>
                         <td class="num neg">−<span data-tm-key="withdrawals"><?php echo esc_html( number_format( $tm['withdrawals'], 2 ) ); ?></span></td>
                     </tr>
+                    <tr>
+                        <td>− Vendor exit settlements this month<br><small style="color:#888">Final pool refunded to leaving vendors via Wise</small></td>
+                        <td class="num neg">−<span data-tm-key="exit_settlements"><?php echo esc_html( number_format( $tm['exit_settlements'], 2 ) ); ?></span></td>
+                    </tr>
+                    <tr>
+                        <td>− Same-vendor loyalty absorbed this month<br><small style="color:#888">Customer −X / vendor unchanged — vendor absorbs their own loyalty cost</small></td>
+                        <td class="num neg">−<span data-tm-key="absorbed"><?php echo esc_html( number_format( $tm['absorbed'], 2 ) ); ?></span></td>
+                    </tr>
                     <tr class="total">
                         <td><strong>= Expected System Total now</strong></td>
                         <td class="num"><strong><span data-tm-key="expected_now"><?php echo esc_html( number_format( $tm['expected_now'], 2 ) ); ?></span></strong></td>
@@ -767,6 +863,14 @@ function nc_admin_reconciliation_page() {
                 <tr>
                     <td>Total Withdrawals (vendor_withdrawal)</td>
                     <td style="text-align:right;color:#c62828;font-weight:600">−<span data-key="total_withdrawals"><?php echo esc_html( number_format( $r['total_withdrawals'], 2 ) ); ?></span></td>
+                </tr>
+                <tr>
+                    <td>Vendor exit settlements (vendor_exit_settlement)<br><small style="color:#888">Final pool refunded to leaving vendors via Wise — real outflow, drops System Total</small></td>
+                    <td style="text-align:right;color:#c62828;font-weight:600">−<span data-key="total_exit_settlements"><?php echo esc_html( number_format( $r['total_exit_settlements'], 2 ) ); ?></span></td>
+                </tr>
+                <tr>
+                    <td>Same-vendor loyalty absorbed (same_vendor_clear)<br><small style="color:#888">Customer redeemed same-vendor points — vendor absorbs the cost without a redeem_accept credit</small></td>
+                    <td style="text-align:right;color:#c62828;font-weight:600">−<span data-key="same_vendor_absorbed"><?php echo esc_html( number_format( $r['same_vendor_absorbed'], 2 ) ); ?></span></td>
                 </tr>
                 <tr style="background:#f0f0f0">
                     <td><strong>Expected Total</strong></td>
@@ -836,13 +940,14 @@ function nc_admin_reconciliation_page() {
             <span style="color:#666;margin-left:6px">(Auto-runs on the 1st via cron — this is for testing or filling gaps.)</span>
         </form>
 
-        <table class="widefat striped" style="max-width:1100px">
+        <table class="widefat striped" style="max-width:1240px">
             <thead>
                 <tr>
                     <th>Month</th>
                     <th style="text-align:right">Vendor Pool</th>
                     <th style="text-align:right">Customer Points</th>
                     <th style="text-align:right">System Total</th>
+                    <th style="text-align:right" title="Cumulative same-vendor loyalty absorbed up to this month">Same-Vendor Absorbed</th>
                     <th style="text-align:right">Expected Total</th>
                     <th>Status</th>
                     <th>Captured</th>
@@ -851,18 +956,20 @@ function nc_admin_reconciliation_page() {
             </thead>
             <tbody>
                 <?php if ( empty( $snapshots ) ) : ?>
-                    <tr><td colspan="8"><em>No snapshots yet. Either wait for the 1st of next month, or click "Capture Snapshot Now" above.</em></td></tr>
+                    <tr><td colspan="9"><em>No snapshots yet. Either wait for the 1st of next month, or click "Capture Snapshot Now" above.</em></td></tr>
                 <?php else : foreach ( $snapshots as $s ) :
                     $month_label = wp_date( 'F Y', strtotime( $s->snapshot_month . '-01' ) );
                     $captured_at = $s->captured_at ? mysql2date( 'M j, Y H:i', $s->captured_at ) : '—';
                     $captured_by = $s->captured_by_name ?: ( $s->captured_by > 0 ? ( 'User #' . $s->captured_by ) : 'Cron' );
                     $is_balanced = (int) $s->balanced === 1;
+                    $absorbed    = isset( $s->same_vendor_absorbed ) ? (float) $s->same_vendor_absorbed : 0.0;
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html( $month_label ); ?></strong><br><small><?php echo esc_html( $s->snapshot_month ); ?></small></td>
                         <td style="text-align:right"><?php echo esc_html( number_format( (float) $s->vendor_pool, 2 ) ); ?></td>
                         <td style="text-align:right"><?php echo esc_html( number_format( (float) $s->customer_points, 2 ) ); ?></td>
                         <td style="text-align:right;font-weight:600"><?php echo esc_html( number_format( (float) $s->system_total, 2 ) ); ?></td>
+                        <td style="text-align:right;color:<?php echo $absorbed > 0 ? '#c62828' : '#999'; ?>"><?php echo esc_html( number_format( $absorbed, 2 ) ); ?></td>
                         <td style="text-align:right;font-weight:600"><?php echo esc_html( number_format( (float) $s->expected_total, 2 ) ); ?></td>
                         <td>
                             <?php if ( $is_balanced ) : ?>
@@ -1058,7 +1165,7 @@ function nc_admin_reconciliation_page() {
 
         function applyData(data) {
             // Update card values
-            ['vendor_pool', 'customer_points', 'system_total', 'expected_total', 'total_topups', 'total_withdrawals', 'total_expired'].forEach(function (key) {
+            ['vendor_pool', 'customer_points', 'system_total', 'expected_total', 'total_topups', 'total_withdrawals', 'total_exit_settlements', 'total_expired', 'same_vendor_absorbed'].forEach(function (key) {
                 document.querySelectorAll('[data-key="' + key + '"]').forEach(function (el) {
                     var oldText = el.textContent;
                     var newText = fmt(data[key]);
@@ -1101,7 +1208,7 @@ function nc_admin_reconciliation_page() {
             // This-month rolling section
             var tm = data.this_month || null;
             if (tm) {
-                ['initial', 'topups', 'withdrawals', 'expired', 'expected_now', 'actual_now'].forEach(function (key) {
+                ['initial', 'topups', 'withdrawals', 'exit_settlements', 'expired', 'absorbed', 'expected_now', 'actual_now'].forEach(function (key) {
                     document.querySelectorAll('[data-tm-key="' + key + '"]').forEach(function (el) {
                         var oldText = el.textContent;
                         var newText = fmt(tm[key]);

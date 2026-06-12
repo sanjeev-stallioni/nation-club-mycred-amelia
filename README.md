@@ -11,7 +11,11 @@ Custom WordPress plugin that integrates [myCRED](https://mycred.me/) with [Ameli
 ## What it does
 
 1. **Vendor-funded rewards.** When an Amelia appointment is approved, the customer earns a percentage of the **full invoice amount** as myCRED points. The serving vendor's pool is debited by the same amount up-front (`earn_liability`). That single debit is the entire cost the vendor pays for that customer's reward.
-2. **Redemption flow.** On the customer's next booking, held points are applied against the new invoice. The serving vendor (which may or may not be the original issuing vendor) receives a credit (`redeem_accept`). The origin vendor is **NOT** debited again — they already paid at earn time. Net vendor pool change per redemption pair: **0**.
+2. **Redemption flow — per-batch classification.** On the customer's next booking, held points are applied against the new invoice. The system walks each consumed batch (FIFO) and classifies it by comparing the batch's `liability_vendor_id` (origin) to the service vendor's WP user_id:
+   - **Cross-vendor portion:** service vendor receives `redeem_accept +X`. Origin vendor is NOT debited again (already paid at earn). Net pool change: 0.
+   - **Same-vendor portion:** service vendor (= origin) receives NO `redeem_accept` — they were already debited at earn time, so re-crediting would refund a liability that's simply being cleared. Instead, an informational `same_vendor_clear` row (creds=0, cleared amount in `data.cleared_amount`) is written so the breakdown still shows the clearance. Net pool change for this portion: customer drops by X; vendor unchanged.
+   - A single redemption can be **mixed** — e.g. 4 pts from same-vendor batch + 2 pts from another vendor's batch → one `same_vendor_clear` (4) + one `redeem_accept +2` for the same booking.
+   - Customer side (`booking_redeem −X`) is always written for the full redeemed amount, regardless of split.
 3. **Vendor pool (admin-verified).** Vendors top up via Wise offline, submit proof in the portal, admin verifies the Wise payment and approves → system creates a proper `vendor_topup` ledger entry and credits the pool. No direct balance editing.
 4. **Vendor withdrawals.** Vendors can request to withdraw surplus above SGD 1,000 only during the configurable monthly window (default 2nd–5th) AND only after last month's statement is Finalized & Sent. Admin reviews → approves → marks paid after Wise payout.
 5. **Monthly statements.** Auto-generated on the 1st of each month for every vendor. Per-vendor, per-month snapshot computed strictly from the points log: opening balance, accepted, earn liability, top-ups, withdrawals, expired, shared costs, closing, required reload, surplus. Simplified status flow: **Draft → Finalized & Sent** (one-click "Finalize & Send Email" combines locking the numbers with sending the PDF). Admin can revert to Draft if a fix is needed.
@@ -19,7 +23,7 @@ Custom WordPress plugin that integrates [myCRED](https://mycred.me/) with [Ameli
 7. **Email notification system.** Eight customizable templates (statement, top-up submitted/approved/rejected, withdrawal submitted/approved-rejected/paid, top-up reminder, low balance alert) with token replacement, plus a global CC field that copies every email to admin/accounts.
 8. **Top-up reminder cron.** On day 6 and 7 of each month, the system emails any vendor whose balance is below SGD 1,000 (skipping vendors whose pending top-up already covers the shortfall).
 9. **Event-based low-balance alert.** When a vendor's balance crosses below a configurable threshold (default SGD 300) — e.g. after a customer redemption settlement — they receive a one-time alert. The flag clears the moment they recover above the threshold.
-10. **Real-time Reconciliation Dashboard.** Live "System Health Check" — Total Vendor Pool, Total Customer Points, System Total, Expected Total (top-ups − withdrawals), Balanced/Mismatch banner with delta. Auto-refreshes every 30 seconds. Per-vendor balance breakdown (paginated) highlights vendors below minimum or at zero. Includes a "This Month" rolling check section that compares this month's activity against the prior month's snapshot to help pinpoint when a discrepancy started.
+10. **Real-time Reconciliation Dashboard.** Live "System Health Check" — Total Vendor Pool, Total Customer Points, System Total, **Vendor Exit Settlements**, **Same-Vendor Absorbed**, Expected Total (**top-ups − withdrawals − vendor exit settlements − same-vendor absorbed**), Balanced/Mismatch banner with delta. Auto-refreshes every 30 seconds. Per-vendor balance breakdown (paginated) highlights vendors below minimum or at zero. Includes a "This Month" rolling check section that compares this month's activity against the prior month's snapshot (with its own "− Vendor exit settlements this month" and "− Same-vendor loyalty absorbed this month" lines) to help pinpoint when a discrepancy started.
 11. **Month-end locked snapshots.** Auto-captured on the 1st of each month into an immutable history table (paginated), providing the official frozen accounting record separate from the live view. Past-month captures back-calculate from current state minus post-cutoff log entries so historical snapshots reflect month-end state, not current state.
 12. **Per-batch expiry with origin-vendor refund.** Each customer earn becomes its own batch, tracked with its own expiry date and source vendor. New earns from one vendor never extend the expiry of points from another vendor. Redemptions consume FIFO (oldest batches first). When a batch expires: customer is debited (`points_expiry`) AND the origin vendor is refunded the equivalent points (`expired_refund`) — net system effect zero, vendor's funded value released back to their pool. The FIFO consumer also excludes expired batches the moment their `expiry_ts` passes, even before the daily cron runs (no "free 30-minute extension" loophole). Expiry windows are configurable from **Nation Club → Expiry Rules** (date-only inputs; auto-rolls each January). Master switch can disable expiry entirely.
 13. **Outstanding Points card on vendor portal.** `[nc_my_points]` shows two side-by-side cards for vendors: **Your Current Points** (pool balance) and **Outstanding Points** (sum of `remaining_amount` across active batches where the vendor is the liability). Always visible for Amelia providers — even at 0 — so vendors get explicit "no liability hanging" confirmation. Hidden for non-provider customers.
@@ -70,7 +74,8 @@ Services not listed fall back to **5%**.
 | `booking_reward` | + customer | Points earned from a booking |
 | `booking_redeem` | − customer | Points spent at next booking |
 | `earn_liability` | − vendor | Origin vendor pool drained at customer's earn time. **The sole vendor debit for a customer-points lifecycle.** |
-| `redeem_accept` | + vendor | Serving vendor accepting the customer's redeemed points |
+| `redeem_accept` | + vendor | Serving vendor accepting the customer's redeemed points — **cross-vendor portion only**. Same-vendor portions are NOT credited (see `same_vendor_clear`). |
+| `same_vendor_clear` | **0** (informational) | Written for the same-vendor portion of a redemption. `creds = 0` (no pool impact). Cleared point count stored in `data.cleared_amount`. Written via direct `$wpdb->insert` since `mycred_add()` rejects 0-amount calls. Used by the breakdown UI, statement detail, and the reconciliation `same_vendor_absorbed` aggregation. |
 | `redeem_liability` | − vendor | **DEPRECATED.** Old origin-vendor settlement debit. No longer created — historical entries remain for audit. |
 | `vendor_topup` | + vendor | Admin-approved Wise top-up |
 | `vendor_withdrawal` | − vendor | Admin-processed Wise payout |
@@ -78,7 +83,7 @@ Services not listed fall back to **5%**.
 | `expired_refund` | + vendor | Origin vendor refunded when a customer's points batch expires unredeemed |
 | `vendor_exit_settlement` | − vendor | Final pool refund on managed vendor exit (Wise reference recorded in the JSON `data` payload) |
 
-Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_vendor_id`, `liability_vendor_id`, `booking_id`, `transaction_id`, `customer_id` for audit and reporting. `expired_refund` entries additionally carry `batch_id`, `earned_ts`, and `expiry_ts`.
+Each entry stores a JSON `data` payload with `service_id`, `vendor_id`, `origin_vendor_id`, `liability_vendor_id`, `booking_id`, `transaction_id`, `customer_id` for audit and reporting. `expired_refund` entries additionally carry `batch_id`, `earned_ts`, and `expiry_ts`. `same_vendor_clear` entries additionally carry `cleared_amount`.
 
 **Transaction ID formats:**
 - `NC0001` — booking (Amelia booking ID, padded)
@@ -133,6 +138,7 @@ Additional admin page:
 - **Reward = % of FULL invoice** (not post-redemption net)
 - **Vendor pool minimum: SGD 1,000** (1 SGD = 1 point)
 - **Vendor pays for loyalty cost ONCE** — at customer's earn time. Cross-vendor redemptions do not double-debit the origin vendor.
+- **Same-vendor redemption does NOT credit the vendor again** — only `same_vendor_clear` (informational, 0 pool impact) is written. The vendor absorbs the loyalty cost they originally funded. Reconciliation subtracts cumulative absorbed amount from Expected Total so the system stays Balanced.
 - **Per-batch expiry FIFO** — each earn is a separate batch, expiry tied to source vendor; redemptions consume oldest batches first; expired batches refund the origin vendor (not a permanent loss)
 - **Withdrawals locked** until previous month's statement is Finalized & Sent (NON-NEGOTIABLE spec rule) AND today is within the configured calendar window
 - **Top-ups always available** — no date restriction so vendors can recover dipping balances any time
@@ -245,10 +251,7 @@ Manual test buttons for #1, #2, and #4 are on the Monthly Statements page; #3 ha
 - Outstanding Points card on vendor portal
 - Cancellation / rejection reason capture + customer email + admin log + auto-cleanup of canceled Amelia bookings
 - Vendor exit flow (Proposal 5) — three-step status workflow with Rejoin support
-
-**Pending (deferred / not blocking):**
-- Admin-initiated top-up — onboard new vendors with the SGD 1,000 seed without requiring vendor login first
-- Cleanup tool for legacy stale canceled bookings predating the auto-cleanup feature
+- **Same-vendor / cross-vendor redemption split** (2026-06-11) — same-vendor portion no longer self-credits the vendor; informational `same_vendor_clear` row + reconciliation `Same-Vendor Absorbed` line keeps the dashboard Balanced
 
 ---
 

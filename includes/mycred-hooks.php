@@ -244,6 +244,7 @@ function mycred_process_appointment($appointment, $trigger)
             // customer's oldest active batches first. Keeps batch tracking in
             // sync with the customer's actual balance so expiry refunds the
             // correct origin vendor for the correct remaining amount.
+            $consumed = array();
             if ( function_exists('nc_batch_consume_fifo') ) {
                 $consumed = nc_batch_consume_fifo( $wp_user_id, $redeem_amount );
                 if ( ! empty($consumed) ) {
@@ -262,40 +263,101 @@ function mycred_process_appointment($appointment, $trigger)
                 $wpdb->update($amelia_bookings_tbl, ['customFields' => wp_json_encode($custom_fields)], ['id' => $bookingId]);
             }
 
-            // Service vendor: credited for honoring the redemption
+            // Service vendor: credited only for the CROSS-VENDOR portion of
+            // the redemption. For same-vendor portions (points originally
+            // issued by this same vendor), we do NOT credit redeem_accept —
+            // the vendor was already debited via earn_liability when those
+            // points were earned, so crediting now would refund them for a
+            // liability that's simply being cleared, not collected from
+            // another vendor. We still write an informational `same_vendor_clear`
+            // entry (amount 0) so the breakdown shows that those old points
+            // were consumed from the customer's outstanding balance.
             $vendor_wp_user_id = intval($wpdb->get_var($wpdb->prepare(
                 "SELECT externalId FROM {$amelia_users_tbl} WHERE id = %d",
                 $providerId
             )));
 
             if ($vendor_wp_user_id > 0) {
-                mycred_add(
-                    'redeem_accept',
-                    $vendor_wp_user_id,
-                    $redeem_amount,
-                    "{$service_name} – Accepted customer redemption of " . number_format($redeem_amount, 2) . " points",
-                    $appointmentId,
-                    $customer_redeem_log_data
-                );
-                if (function_exists('nc_vendor_check_low_balance')) {
-                    nc_vendor_check_low_balance((int) $vendor_wp_user_id);
+                // Walk the consumed batches and classify each portion by
+                // comparing batch.liability_vendor_id (origin vendor's WP id)
+                // to this service vendor's WP id.
+                $same_vendor_amount  = 0.0;
+                $cross_vendor_amount = 0.0;
+
+                if ( ! empty($consumed) ) {
+                    $batch_ids = array_map(function($c) { return (int) $c['batch_id']; }, $consumed);
+                    $batch_tbl = $wpdb->prefix . 'nc_customer_point_batches';
+                    $placeholders = implode(',', array_fill(0, count($batch_ids), '%d'));
+                    $batch_origins = $wpdb->get_results( $wpdb->prepare(
+                        "SELECT id, liability_vendor_id FROM {$batch_tbl} WHERE id IN ({$placeholders})",
+                        ...$batch_ids
+                    ), OBJECT_K );
+
+                    foreach ( $consumed as $c ) {
+                        $bid    = (int) $c['batch_id'];
+                        $amount = (float) $c['amount'];
+                        $origin_wp_id = isset($batch_origins[$bid]) ? (int) $batch_origins[$bid]->liability_vendor_id : 0;
+                        if ( $origin_wp_id > 0 && $origin_wp_id === (int) $vendor_wp_user_id ) {
+                            $same_vendor_amount += $amount;
+                        } else {
+                            $cross_vendor_amount += $amount;
+                        }
+                    }
+                } else {
+                    // No batch trace available (legacy / manual grant). Treat
+                    // as cross-vendor so the service vendor is credited — we
+                    // can't prove it was same-vendor.
+                    $cross_vendor_amount = $redeem_amount;
                 }
-                $wlog("↩️ Credited {$redeem_amount} pts to service vendor {$vendor_wp_user_id} (redeem_accept).");
+
+                $same_vendor_amount  = round($same_vendor_amount, 2);
+                $cross_vendor_amount = round($cross_vendor_amount, 2);
+
+                if ($cross_vendor_amount > 0) {
+                    mycred_add(
+                        'redeem_accept',
+                        $vendor_wp_user_id,
+                        $cross_vendor_amount,
+                        "{$service_name} – Accepted customer redemption of " . number_format($cross_vendor_amount, 2) . " points",
+                        $appointmentId,
+                        $customer_redeem_log_data
+                    );
+                    if (function_exists('nc_vendor_check_low_balance')) {
+                        nc_vendor_check_low_balance((int) $vendor_wp_user_id);
+                    }
+                    $wlog("↩️ Credited {$cross_vendor_amount} pts to service vendor {$vendor_wp_user_id} (redeem_accept, cross-vendor portion).");
+                }
+
+                if ($same_vendor_amount > 0) {
+                    $same_vendor_log_data = json_encode(array_merge(
+                        json_decode($customer_redeem_log_data, true) ?: array(),
+                        array( 'cleared_amount' => $same_vendor_amount )
+                    ));
+                    // mycred_add() rejects 0-amount calls in most myCRED versions,
+                    // so write the informational row directly to the log table.
+                    // creds=0 means no balance change; the cleared count lives in data.cleared_amount.
+                    $wpdb->insert(
+                        $wpdb->prefix . 'myCRED_log',
+                        array(
+                            'ref'     => 'same_vendor_clear',
+                            'ref_id'  => (int) $appointmentId,
+                            'user_id' => (int) $vendor_wp_user_id,
+                            'creds'   => 0,
+                            'ctype'   => 'mycred_default',
+                            'entry'   => "{$service_name} – Same-vendor points cleared: " . number_format($same_vendor_amount, 2) . " (informational, 0 pool impact)",
+                            'data'    => $same_vendor_log_data,
+                            'time'    => time(),
+                        ),
+                        array( '%s', '%d', '%d', '%f', '%s', '%s', '%s', '%d' )
+                    );
+                    $wlog("ℹ️ Same-vendor clear: {$same_vendor_amount} pts removed from customer's outstanding (no pool impact on vendor {$vendor_wp_user_id}).");
+                }
             }
 
             // Origin vendor: NOT debited again at redeem time.
             // The origin vendor's pool was already drained when the customer earned
             // these points (earn_liability). Debiting again here would double-count
             // the same liability.
-            //
-            // Net flow across vendors after this change:
-            //   Earn:   origin vendor -X (earn_liability)        — funds the loyalty
-            //   Redeem: receiving vendor +X (redeem_accept)      — collects the value
-            //   Total vendor pool change: 0 ✓
-            //
-            // Historical redeem_liability entries (created before this change) remain
-            // intact in the log and on past statements — they reflect what actually
-            // happened to those vendor balances at the time.
             if ($origin_vendor_id > 0) {
                 $wlog("ℹ️ Origin vendor amelia_id={$origin_vendor_id}: no debit applied — already paid via earn_liability when customer earned these pts.");
             } else {

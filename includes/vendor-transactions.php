@@ -39,7 +39,7 @@ function nc_query_vendor_transactions( $user_id, $per_page = 10, $offset = 0 ) {
          ))
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')",
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund','same_vendor_clear')",
         $user_id
     ) );
 
@@ -62,7 +62,7 @@ function nc_query_vendor_transactions( $user_id, $per_page = 10, $offset = 0 ) {
             MAX(entry)                                            AS entry_any
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund','same_vendor_clear')
          GROUP BY txn_id
          ORDER BY occurred_at DESC
          LIMIT %d OFFSET %d",
@@ -279,7 +279,7 @@ function nc_ajax_get_txn_breakdown() {
         "SELECT ref, creds, entry, data, time
          FROM {$log_tbl}
          WHERE user_id = %d
-           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund')
+           AND ref IN ('redeem_accept','redeem_liability','earn_liability','expired_refund','same_vendor_clear')
            AND COALESCE(
                    JSON_UNQUOTE(JSON_EXTRACT(data, '$.transaction_id')),
                    CONCAT('BATCH-', JSON_UNQUOTE(JSON_EXTRACT(data, '$.batch_id')))
@@ -294,10 +294,11 @@ function nc_ajax_get_txn_breakdown() {
     }
 
     $labels = array(
-        'redeem_accept'    => __( 'Customer redeemed points', 'nation-club-mycred-amelia' ),
-        'redeem_liability' => __( 'Old points liability cleared', 'nation-club-mycred-amelia' ),
-        'earn_liability'   => __( 'New points issued', 'nation-club-mycred-amelia' ),
-        'expired_refund'   => __( 'Customer batch expired — refunded to your pool', 'nation-club-mycred-amelia' ),
+        'redeem_accept'     => __( 'Customer redeemed points', 'nation-club-mycred-amelia' ),
+        'redeem_liability'  => __( 'Old points liability cleared', 'nation-club-mycred-amelia' ),
+        'earn_liability'    => __( 'New points issued', 'nation-club-mycred-amelia' ),
+        'expired_refund'    => __( 'Customer batch expired — refunded to your pool', 'nation-club-mycred-amelia' ),
+        'same_vendor_clear' => __( 'Same-vendor points cleared (informational)', 'nation-club-mycred-amelia' ),
     );
 
     $net  = 0.0;
@@ -350,6 +351,23 @@ function nc_ajax_get_txn_breakdown() {
         $creds     = (float) $row->creds;
         $net      += $creds;
         $label     = isset( $labels[ $row->ref ] ) ? $labels[ $row->ref ] : $row->ref;
+
+        // For informational same_vendor_clear rows, display the cleared point
+        // count (from data.cleared_amount) instead of the raw 0 creds value —
+        // so the vendor can still see how many old points were consumed from
+        // the customer's outstanding balance. Pool impact stays 0.
+        if ( $row->ref === 'same_vendor_clear' ) {
+            $payload = json_decode( $row->data, true );
+            $cleared = isset( $payload['cleared_amount'] ) ? (float) $payload['cleared_amount'] : 0.0;
+            $display = number_format( $cleared, 2 ) . ' ' . __( '(no pool impact)', 'nation-club-mycred-amelia' );
+            $html   .= sprintf(
+                '<div class="nc-txn-line nc-txn-line--info"><span>%s:</span><span class="nc-net--info">%s</span></div>',
+                esc_html( $label ),
+                esc_html( $display )
+            );
+            continue;
+        }
+
         $css_class = $creds > 0 ? 'nc-net--pos' : ( $creds < 0 ? 'nc-net--neg' : '' );
 
         $html .= sprintf(

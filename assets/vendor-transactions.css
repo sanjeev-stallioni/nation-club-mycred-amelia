@@ -7,6 +7,8 @@
 .nc-net{font-weight:700;text-align:center;white-space:nowrap;}
 .nc-net--pos{color:#1a8d2e;}
 .nc-net--neg{color:#c62828;}
+.nc-net--info{color:#777;font-style:italic;}
+.nc-txn-line--info{color:#666;}
 .nc-txn-view{color:#8b1a3b;text-decoration:underline;cursor:pointer;}
 .nc-txn-view:hover{color:#6b1029;}
 .nc-txn-breakdown-row > td{background:#faf4f6 !important;padding:18px 24px;}

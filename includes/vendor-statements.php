@@ -14,12 +14,15 @@
  *   month's statement is Finalized (closes the NON-NEGOTIABLE Lock Period rule).
  *
  * Calculation sources (grouped strictly by vendor_id):
- *   + redeem_accept       — customer redeemed old points at this vendor
+ *   + redeem_accept       — cross-vendor portion of a customer redemption at this vendor
  *   - earn_liability      — this vendor issued new points to a customer
  *   - redeem_liability    — this vendor (as origin) bore cost of customer redemption elsewhere
  *   + vendor_topup        — admin-credited top-up
  *   - vendor_withdrawal   — processed payout
  *   (informational) points_expiry where data.liability_vendor_id = this vendor
+ *   (informational) same_vendor_clear — same-vendor portion of a redemption; amount 0,
+ *                                       included in detail snapshot for transparency
+ *                                       but does NOT affect totals.
  *
  * Closing = Opening + (accepted) - (earn_liability) - (redeem_liability)
  *           + (topup) - (withdrawal)
@@ -1030,6 +1033,16 @@ function nc_admin_statement_view_page( $id ) {
     $entries = isset( $detail['entries'] ) ? $detail['entries'] : array();
     $expired = isset( $detail['expired_entries'] ) ? $detail['expired_entries'] : array();
 
+    // Sum the same-vendor cleared amount on-the-fly from detail entries
+    // (creds=0 on these rows; cleared count is in data.cleared_amount).
+    $same_vendor_cleared = 0.0;
+    foreach ( $entries as $e ) {
+        if ( ( $e['ref'] ?? '' ) === 'same_vendor_clear' ) {
+            $d = is_string( $e['data'] ?? '' ) ? json_decode( $e['data'], true ) : ( $e['data'] ?? array() );
+            $same_vendor_cleared += isset( $d['cleared_amount'] ) ? (float) $d['cleared_amount'] : 0.0;
+        }
+    }
+
     $back = esc_url( admin_url( 'admin.php?page=nc-statements' ) );
     ?>
     <div class="wrap">
@@ -1064,6 +1077,9 @@ function nc_admin_statement_view_page( $id ) {
             <table class="wp-list-table widefat striped" style="max-width:560px">
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
                 <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
+                <?php if ( $same_vendor_cleared > 0 ) : ?>
+                <tr style="color:#888"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em><br><small>Customer redeemed points originally issued by this same vendor — already absorbed via earn_liability.</small></td><td style="text-align:right;font-style:italic"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
+                <?php endif; ?>
                 <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
                 <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
                 <tr><td>Points redeemed from vendor liability (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
@@ -1119,19 +1135,27 @@ function nc_admin_statement_view_page( $id ) {
                     <?php foreach ( $entries as $e ) :
                         $data  = is_string( $e['data'] ?? '' ) ? json_decode( $e['data'], true ) : ( $e['data'] ?? array() );
                         $creds = (float) ( $e['creds'] ?? 0 );
+                        $ref   = $e['ref'] ?? '';
+                        $is_info = ( $ref === 'same_vendor_clear' );
                         $color = $creds > 0 ? '#1a8d2e' : ( $creds < 0 ? '#c62828' : '' );
                         $txn   = $data['transaction_id'] ?? ( $data['topup_id'] ?? ( $data['withdrawal_id'] ?? '—' ) );
                         $cust  = isset( $data['customer_id'] ) ? nc_statement_customer_name( (int) $data['customer_id'] ) : '—';
                         $svc   = isset( $data['service_id'] ) ? nc_statement_service_name( (int) $data['service_id'] ) : '—';
+                        $row_style = $is_info ? 'color:#888;font-style:italic;background:#fafafa' : '';
                         ?>
-                        <tr>
+                        <tr style="<?php echo esc_attr( $row_style ); ?>">
                             <td><?php echo esc_html( wp_date( 'M j, Y', (int) $e['time'] ) ); ?></td>
-                            <td><code><?php echo esc_html( $e['ref'] ); ?></code></td>
+                            <td><code><?php echo esc_html( $ref ); ?></code></td>
                             <td><?php echo esc_html( $txn ); ?></td>
                             <td><?php echo esc_html( $cust ); ?></td>
                             <td><?php echo esc_html( $svc ); ?></td>
                             <td style="text-align:right;color:<?php echo esc_attr( $color ); ?>;font-weight:600">
-                                <?php echo ( $creds > 0 ? '+' : '' ) . esc_html( number_format( $creds, 2 ) ); ?>
+                                <?php if ( $is_info ) :
+                                    $cleared = isset( $data['cleared_amount'] ) ? (float) $data['cleared_amount'] : 0.0; ?>
+                                    0.00 <small style="color:#999">(cleared <?php echo esc_html( number_format( $cleared, 2 ) ); ?>)</small>
+                                <?php else :
+                                    echo ( $creds > 0 ? '+' : '' ) . esc_html( number_format( $creds, 2 ) );
+                                endif; ?>
                             </td>
                             <td><?php echo esc_html( wp_strip_all_tags( html_entity_decode( $e['entry'] ?? '', ENT_QUOTES, 'UTF-8' ) ) ); ?></td>
                         </tr>
@@ -1490,6 +1514,14 @@ function nc_statement_build_pdf_html( $row ) {
     $entries = isset( $detail['entries'] ) ? $detail['entries'] : array();
     $expired = isset( $detail['expired_entries'] ) ? $detail['expired_entries'] : array();
 
+    $same_vendor_cleared = 0.0;
+    foreach ( $entries as $e ) {
+        if ( ( $e['ref'] ?? '' ) === 'same_vendor_clear' ) {
+            $d = is_string( $e['data'] ?? '' ) ? json_decode( $e['data'], true ) : ( $e['data'] ?? array() );
+            $same_vendor_cleared += isset( $d['cleared_amount'] ) ? (float) $d['cleared_amount'] : 0.0;
+        }
+    }
+
     $vendor_name = $row->vendor_name ?: ( 'Vendor #' . $row->vendor_id );
     $gen_date    = $row->generated_at ? mysql2date( 'M j, Y', $row->generated_at ) : '';
     $site        = get_bloginfo( 'name' );
@@ -1542,6 +1574,9 @@ function nc_statement_build_pdf_html( $row ) {
         <table class="summary">
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
             <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
+            <?php if ( $same_vendor_cleared > 0 ) : ?>
+            <tr class="muted"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em></td><td class="num muted"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
+            <?php endif; ?>
             <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
             <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
             <tr><td>Points redeemed from vendor liability (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
@@ -1581,18 +1616,28 @@ function nc_statement_build_pdf_html( $row ) {
                 <?php foreach ( $entries as $e ) :
                     $data  = is_string( $e['data'] ?? '' ) ? json_decode( $e['data'], true ) : ( $e['data'] ?? array() );
                     $creds = (float) ( $e['creds'] ?? 0 );
-                    $class = $creds > 0 ? 'pos' : ( $creds < 0 ? 'neg' : '' );
+                    $ref   = $e['ref'] ?? '';
+                    $is_info = ( $ref === 'same_vendor_clear' );
+                    $class = $is_info ? 'muted' : ( $creds > 0 ? 'pos' : ( $creds < 0 ? 'neg' : '' ) );
+                    $row_class = $is_info ? 'muted' : '';
                     $txn   = $data['transaction_id'] ?? ( $data['topup_id'] ?? ( $data['withdrawal_id'] ?? '—' ) );
                     $cust  = isset( $data['customer_id'] ) ? nc_statement_customer_name( (int) $data['customer_id'] ) : '—';
                     $svc   = isset( $data['service_id'] ) ? nc_statement_service_name( (int) $data['service_id'] ) : '—';
                     ?>
-                    <tr>
+                    <tr class="<?php echo esc_attr( $row_class ); ?>">
                         <td><?php echo esc_html( wp_date( 'M j, Y', (int) $e['time'] ) ); ?></td>
-                        <td><?php echo esc_html( $e['ref'] ); ?></td>
+                        <td><?php echo esc_html( $ref ); ?></td>
                         <td><?php echo esc_html( $txn ); ?></td>
                         <td><?php echo esc_html( $cust ); ?></td>
                         <td><?php echo esc_html( $svc ); ?></td>
-                        <td class="num <?php echo esc_attr( $class ); ?>"><?php echo ( $creds > 0 ? '+' : '' ) . esc_html( number_format( $creds, 2 ) ); ?></td>
+                        <td class="num <?php echo esc_attr( $class ); ?>">
+                            <?php if ( $is_info ) :
+                                $cleared = isset( $data['cleared_amount'] ) ? (float) $data['cleared_amount'] : 0.0; ?>
+                                0.00 (cleared <?php echo esc_html( number_format( $cleared, 2 ) ); ?>)
+                            <?php else :
+                                echo ( $creds > 0 ? '+' : '' ) . esc_html( number_format( $creds, 2 ) );
+                            endif; ?>
+                        </td>
                         <td><?php echo esc_html( wp_strip_all_tags( html_entity_decode( $e['entry'] ?? '', ENT_QUOTES, 'UTF-8' ) ) ); ?></td>
                     </tr>
                 <?php endforeach; ?>
