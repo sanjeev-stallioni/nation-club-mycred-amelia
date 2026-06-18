@@ -74,7 +74,13 @@ function nc_my_points_shortcode() {
         </div>
 
         <?php if ( empty( $rows ) ) : ?>
-            <p class="nc-mp-empty">You don't have any active points right now. Book a service to start earning.</p>
+            <?php if ( $is_vendor ) : ?>
+                <?php if ( $balance <= 0 ) : ?>
+                    <p class="nc-mp-empty">You have no points in your pool. Please top up to start operating.</p>
+                <?php endif; ?>
+            <?php else : ?>
+                <p class="nc-mp-empty">You don't have any active points right now. Book a service to start earning.</p>
+            <?php endif; ?>
         <?php else : ?>
             <h3 class="nc-mp-title">Breakdown by earn batch</h3>
             <p class="nc-mp-hint">When you redeem, your oldest points are spent first. Each batch expires on its own date.</p>
