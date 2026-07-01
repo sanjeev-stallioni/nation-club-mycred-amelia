@@ -181,6 +181,67 @@ function nc_statement_fetch_expired_liability( $vendor_id, $start_ts, $end_ts ) 
     ) );
 }
 
+function nc_statement_order_entries( $entries ) {
+    if ( ! is_array( $entries ) || count( $entries ) < 2 ) {
+        return $entries;
+    }
+
+    $groups = array();  // key => rows[]
+    $anchor = array();  // key => array( time, id )  (earliest row in the group)
+
+    foreach ( $entries as $i => $e ) {
+        $data = is_string( $e['data'] ?? '' ) ? json_decode( $e['data'], true ) : ( $e['data'] ?? array() );
+        if ( ! is_array( $data ) ) {
+            $data = array();
+        }
+
+        $txn = $data['transaction_id'] ?? ( $data['topup_id'] ?? ( $data['withdrawal_id'] ?? '' ) );
+        $key = ( $txn !== '' && $txn !== null )
+            ? 'txn:' . $txn
+            : 'row:' . ( $e['ref'] ?? '' ) . ':' . ( $e['ref_id'] ?? '' ) . ':' . ( $e['id'] ?? $i );
+
+        $t  = (int) ( $e['time'] ?? 0 );
+        $id = (int) ( $e['id'] ?? 0 );
+
+        if ( ! isset( $groups[ $key ] ) ) {
+            $groups[ $key ] = array();
+            $anchor[ $key ] = array( $t, $id );
+        } elseif ( $t < $anchor[ $key ][0] || ( $t === $anchor[ $key ][0] && $id < $anchor[ $key ][1] ) ) {
+            $anchor[ $key ] = array( $t, $id );
+        }
+
+        $groups[ $key ][] = $e;
+    }
+
+    // Order the transaction blocks by their earliest (time, id).
+    $keys = array_keys( $groups );
+    usort( $keys, function ( $a, $b ) use ( $anchor ) {
+        if ( $anchor[ $a ][0] !== $anchor[ $b ][0] ) {
+            return $anchor[ $a ][0] <=> $anchor[ $b ][0];
+        }
+        return $anchor[ $a ][1] <=> $anchor[ $b ][1];
+    } );
+
+    $ordered = array();
+    foreach ( $keys as $key ) {
+        $rows = $groups[ $key ];
+        // Within a block, keep rows in (time, id) order too.
+        usort( $rows, function ( $a, $b ) {
+            $ta = (int) ( $a['time'] ?? 0 );
+            $tb = (int) ( $b['time'] ?? 0 );
+            if ( $ta !== $tb ) {
+                return $ta <=> $tb;
+            }
+            return ( (int) ( $a['id'] ?? 0 ) ) <=> ( (int) ( $b['id'] ?? 0 ) );
+        } );
+        foreach ( $rows as $r ) {
+            $ordered[] = $r;
+        }
+    }
+
+    return $ordered;
+}
+
 /**
  * Compute all statement numbers for a vendor+month from the ledger.
  * Does NOT persist — returns an associative array.
@@ -1030,7 +1091,7 @@ function nc_admin_statement_view_page( $id ) {
     }
 
     $detail = $row->detail_data ? json_decode( $row->detail_data, true ) : array( 'entries' => array(), 'expired_entries' => array() );
-    $entries = isset( $detail['entries'] ) ? $detail['entries'] : array();
+    $entries = isset( $detail['entries'] ) ? nc_statement_order_entries( $detail['entries'] ) : array();
     $expired = isset( $detail['expired_entries'] ) ? $detail['expired_entries'] : array();
 
     // Sum the same-vendor cleared amount on-the-fly from detail entries
@@ -1511,7 +1572,7 @@ function nc_statement_service_name( $service_id ) {
  */
 function nc_statement_build_pdf_html( $row ) {
     $detail  = $row->detail_data ? json_decode( $row->detail_data, true ) : array();
-    $entries = isset( $detail['entries'] ) ? $detail['entries'] : array();
+    $entries = isset( $detail['entries'] ) ? nc_statement_order_entries( $detail['entries'] ) : array();
     $expired = isset( $detail['expired_entries'] ) ? $detail['expired_entries'] : array();
 
     $same_vendor_cleared = 0.0;
