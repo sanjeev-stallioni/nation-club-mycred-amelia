@@ -346,7 +346,12 @@ function mycred_process_appointment($appointment, $trigger)
                             'ctype'   => 'mycred_default',
                             'entry'   => "{$service_name} – Same-vendor points cleared: " . number_format($same_vendor_amount, 2) . " (informational, 0 pool impact)",
                             'data'    => $same_vendor_log_data,
-                            'time'    => time(),
+                            // Match myCRED's own convention: it stamps log rows
+                            // with WP-local time (current_time), NOT raw UTC.
+                            // Using time() here stored these rows GMT-offset
+                            // hours early (e.g. 8h behind in SGT), which pushed
+                            // them out of order in the statement ledger.
+                            'time'    => current_time( 'timestamp' ),
                         ),
                         array( '%s', '%d', '%d', '%f', '%s', '%s', '%s', '%d' )
                     );
