@@ -1151,7 +1151,7 @@ function nc_admin_statement_view_page( $id ) {
                 <tr><td>Refund from expired customer points (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
                 <?php endif; ?>
                 <tr>
-                    <td>Shared costs / subscription <em>(−)</em></td>
+                    <td>Shared cost <em>(−)</em></td>
                     <td style="text-align:right">
                         <?php if ( $row->status === 'draft' ) : ?>
                             <form method="post" style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
@@ -1626,9 +1626,6 @@ function nc_statement_build_pdf_html( $row ) {
                 <td><strong>Statement Month:</strong> <?php echo esc_html( $row->statement_month ); ?></td>
                 <td><strong>Statement Date:</strong> <?php echo esc_html( $gen_date ); ?></td>
             </tr>
-            <tr>
-                <td colspan="2"><strong>Status:</strong> <?php echo esc_html( $row->status === 'draft' ? 'Draft' : 'Finalized & Sent' ); ?></td>
-            </tr>
         </table>
 
         <h2>Summary</h2>
@@ -1647,7 +1644,7 @@ function nc_statement_build_pdf_html( $row ) {
             <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
             <tr><td>Refund from expired customer points (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
             <?php endif; ?>
-            <tr><td>Shared costs / subscription (−)</td><td class="num <?php echo $row->shared_costs > 0 ? 'neg' : ''; ?>"><?php echo $row->shared_costs > 0 ? '−' : ''; ?><?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+            <tr><td>Shared cost (−)</td><td class="num <?php echo $row->shared_costs > 0 ? 'neg' : ''; ?>"><?php echo $row->shared_costs > 0 ? '−' : ''; ?><?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>
                 <tr><td>Required reload to restore SGD 1,000</td><td class="num neg"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
