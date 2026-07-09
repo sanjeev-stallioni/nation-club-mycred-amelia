@@ -289,7 +289,12 @@ function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
     }
 
     $shared_costs = round( max( 0, (float) $shared_costs ), 2 );
-    $closing      = round( $opening + $accepted - $earn_liab - $redeem_liab + $topup - $withdrawal + $expired_refund - $shared_costs, 2 );
+
+    // Shared cost is a vendor billing item, NOT a points-pool movement, so it is
+    // kept OUT of the closing pool balance (and therefore out of the required
+    // top-up / surplus, which reflect the pool only). It is shown as a separate
+    // payable line on the statement.
+    $closing = round( $opening + $accepted - $earn_liab - $redeem_liab + $topup - $withdrawal + $expired_refund, 2 );
 
     $min = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? NC_VENDOR_POOL_MIN_BALANCE : 1000;
     $topup_required = max( 0, round( $min - $closing, 2 ) );
@@ -1150,8 +1155,17 @@ function nc_admin_statement_view_page( $id ) {
                 <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
                 <tr><td>Refund from expired customer points (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
                 <?php endif; ?>
-                <tr>
-                    <td>Shared cost <em>(−)</em></td>
+                <tr style="background:#f0f0f0"><td><strong>Closing balance</strong></td><td style="text-align:right"><strong><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></strong></td></tr>
+                <?php if ( $row->topup_required > 0 ) : ?>
+                    <tr><td>Required reload to restore SGD 1,000</td><td style="text-align:right;color:#b32d2e"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
+                <?php endif; ?>
+                <?php if ( $row->surplus > 0 ) : ?>
+                    <tr><td>Surplus above SGD 1,000</td><td style="text-align:right;color:#1a8d2e"><strong><?php echo esc_html( number_format( (float) $row->surplus, 2 ) ); ?></strong></td></tr>
+                <?php endif; ?>
+                <!-- Shared cost: vendor billing item, billed separately, NOT part of the points pool -->
+                <tr><td colspan="2" style="padding:6px 0;border:0"></td></tr>
+                <tr style="border-top:2px solid #ddd">
+                    <td>Shared cost <small style="color:#888">(billed separately — not a pool movement)</small></td>
                     <td style="text-align:right">
                         <?php if ( $row->status === 'draft' ) : ?>
                             <form method="post" style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
@@ -1162,17 +1176,10 @@ function nc_admin_statement_view_page( $id ) {
                                 <button type="submit" class="button button-small" title="Save shared cost and regenerate the statement from the latest ledger">Update &amp; Regenerate</button>
                             </form>
                         <?php else : ?>
-                            <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?>
+                            SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?>
                         <?php endif; ?>
                     </td>
                 </tr>
-                <tr style="background:#f0f0f0"><td><strong>Closing balance</strong></td><td style="text-align:right"><strong><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></strong></td></tr>
-                <?php if ( $row->topup_required > 0 ) : ?>
-                    <tr><td>Required reload to restore SGD 1,000</td><td style="text-align:right;color:#b32d2e"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
-                <?php endif; ?>
-                <?php if ( $row->surplus > 0 ) : ?>
-                    <tr><td>Surplus above SGD 1,000</td><td style="text-align:right;color:#1a8d2e"><strong><?php echo esc_html( number_format( (float) $row->surplus, 2 ) ); ?></strong></td></tr>
-                <?php endif; ?>
             </table>
 
             <!-- Detail -->
@@ -1644,7 +1651,6 @@ function nc_statement_build_pdf_html( $row ) {
             <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
             <tr><td>Refund from expired customer points (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
             <?php endif; ?>
-            <tr><td>Shared cost (−)</td><td class="num <?php echo $row->shared_costs > 0 ? 'neg' : ''; ?>"><?php echo $row->shared_costs > 0 ? '−' : ''; ?><?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>
                 <tr><td>Required reload to restore SGD 1,000</td><td class="num neg"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
@@ -1652,6 +1658,8 @@ function nc_statement_build_pdf_html( $row ) {
             <?php if ( $row->surplus > 0 ) : ?>
                 <tr><td>Surplus above SGD 1,000</td><td class="num pos"><strong><?php echo esc_html( number_format( (float) $row->surplus, 2 ) ); ?></strong></td></tr>
             <?php endif; ?>
+            <tr><td colspan="2" style="border:0;padding:4px 0"></td></tr>
+            <tr><td>Shared cost <span class="muted">(billed separately — not a pool movement)</span></td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
         </table>
 
         <h2>Detail</h2>
