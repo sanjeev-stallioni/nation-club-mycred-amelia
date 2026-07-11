@@ -56,6 +56,7 @@ require_once NC_MYCRE_AMELIA_PATH . 'includes/mycred-hooks.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-transactions.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-pool.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-statements.php';
+require_once NC_MYCRE_AMELIA_PATH . 'includes/statement-branding.php';       // Nation Club → Statement Branding (logo / header / background for the PDF)
 require_once NC_MYCRE_AMELIA_PATH . 'includes/reconciliation.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/customer-points-shortcode.php'; // [nc_my_points] — customer-facing points + batch breakdown
 require_once NC_MYCRE_AMELIA_PATH . 'includes/log-viewer.php';                  // Nation Club → Log
