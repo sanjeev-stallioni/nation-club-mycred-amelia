@@ -35,7 +35,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'NC_STATEMENT_DB_VERSION', '1.2.0' );
+define( 'NC_STATEMENT_DB_VERSION', '1.3.0' );
 
 /* -------------------------------------------------------------------------
  * 1. Schema
@@ -67,6 +67,7 @@ function nc_statements_install() {
         points_expired DECIMAL(12,2) NOT NULL DEFAULT 0,
         points_expired_refund DECIMAL(12,2) NOT NULL DEFAULT 0,
         shared_costs DECIMAL(12,2) NOT NULL DEFAULT 0,
+        shared_cost_collected DECIMAL(12,2) NOT NULL DEFAULT 0,
         topup_required DECIMAL(12,2) NOT NULL DEFAULT 0,
         surplus DECIMAL(12,2) NOT NULL DEFAULT 0,
         status VARCHAR(20) NOT NULL DEFAULT 'draft',
@@ -89,6 +90,14 @@ function nc_statements_install() {
     ) {$charset};";
 
     dbDelta( $sql );
+
+    // One-time migration for the shared_cost_collected column (scope item 4).
+    // Treat every statement BEFORE June 2026 as already settled offline, so the
+    // new auto-deduction never retroactively collects an old shared cost. June
+    // 2026 and later stay at 0 (collectible). Scoped + idempotent — safe to
+    // re-run on future upgrades (it never touches Jun 2026+).
+    $wpdb->query( "UPDATE {$table} SET shared_cost_collected = shared_costs WHERE statement_month < '2026-06'" );
+
     update_option( 'nc_statements_db_version', NC_STATEMENT_DB_VERSION );
 }
 
@@ -97,6 +106,64 @@ add_action( 'plugins_loaded', function () {
         nc_statements_install();
     }
 } );
+
+/**
+ * Shared-cost deduction on top-up (scope item 4).
+ *
+ * When a vendor pays a combined Wise amount, the shared cost is taken FIRST and
+ * only the remainder is credited to the points pool. This finds the vendor's
+ * most recent statement that still has an unpaid shared cost, deducts up to
+ * $amount from it, records the collected total on that statement (a hidden
+ * column — never displayed), and returns how much was applied to shared cost.
+ * The caller credits only ($amount - returned) to the pool.
+ *
+ * Nothing else is stored: the shared cost never enters the points ledger, so
+ * reconciliation is unaffected. The hidden counter exists purely to stop the
+ * same shared cost being deducted twice (e.g. on a second top-up in the month).
+ *
+ * @return float Amount applied to shared cost (0 if none outstanding).
+ */
+function nc_statement_collect_shared_cost( $vendor_id, $amount ) {
+    global $wpdb;
+
+    $vendor_id = (int) $vendor_id;
+    $amount    = round( (float) $amount, 2 );
+    if ( $vendor_id <= 0 || $amount <= 0 ) {
+        return 0.0;
+    }
+
+    $table = nc_statements_table();
+
+    $row = $wpdb->get_row( $wpdb->prepare(
+        "SELECT id, shared_costs, shared_cost_collected
+         FROM {$table}
+         WHERE vendor_id = %d AND shared_costs > shared_cost_collected
+         ORDER BY statement_month DESC
+         LIMIT 1",
+        $vendor_id
+    ) );
+
+    if ( ! $row ) {
+        return 0.0;
+    }
+
+    $remaining = round( (float) $row->shared_costs - (float) $row->shared_cost_collected, 2 );
+    if ( $remaining <= 0 ) {
+        return 0.0;
+    }
+
+    $deduct = min( $remaining, $amount );
+
+    $wpdb->update(
+        $table,
+        array( 'shared_cost_collected' => round( (float) $row->shared_cost_collected + $deduct, 2 ) ),
+        array( 'id' => (int) $row->id ),
+        array( '%f' ),
+        array( '%d' )
+    );
+
+    return round( $deduct, 2 );
+}
 
 /* -------------------------------------------------------------------------
  * 2. Computation helpers
@@ -1138,8 +1205,9 @@ function nc_admin_statement_view_page( $id ) {
                 </tr>
             </table>
 
-            <!-- Summary -->
-            <h2 style="margin-top:24px">Summary</h2>
+            <!-- Section 1: Points Pool Summary -->
+            <h2 style="margin-top:24px">1. Points Pool Summary</h2>
+            <p class="description" style="margin:0 0 8px">Nation Club point movements only.</p>
             <table class="wp-list-table widefat striped" style="max-width:560px">
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
                 <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
@@ -1157,15 +1225,19 @@ function nc_admin_statement_view_page( $id ) {
                 <?php endif; ?>
                 <tr style="background:#f0f0f0"><td><strong>Closing balance</strong></td><td style="text-align:right"><strong><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></strong></td></tr>
                 <?php if ( $row->topup_required > 0 ) : ?>
-                    <tr><td>Required reload to restore SGD 1,000</td><td style="text-align:right;color:#b32d2e"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
+                    <tr><td>Required Pool Top-Up to Minimum SGD 1,000</td><td style="text-align:right;color:#b32d2e"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
                 <?php endif; ?>
                 <?php if ( $row->surplus > 0 ) : ?>
                     <tr><td>Surplus above SGD 1,000</td><td style="text-align:right;color:#1a8d2e"><strong><?php echo esc_html( number_format( (float) $row->surplus, 2 ) ); ?></strong></td></tr>
                 <?php endif; ?>
-                <!-- Shared cost: vendor billing item, billed separately, NOT part of the points pool -->
-                <tr><td colspan="2" style="padding:6px 0;border:0"></td></tr>
-                <tr style="border-top:2px solid #ddd">
-                    <td>Shared cost <small style="color:#888">(billed separately — not a pool movement)</small></td>
+            </table>
+
+            <!-- Section 2: Shared Cost -->
+            <h2 style="margin-top:24px">2. Shared Cost</h2>
+            <p class="description" style="margin:0 0 8px">Billed separately — not part of the Nation Club Points Pool.</p>
+            <table class="wp-list-table widefat striped" style="max-width:560px">
+                <tr>
+                    <td>Shared cost</td>
                     <td style="text-align:right">
                         <?php if ( $row->status === 'draft' ) : ?>
                             <form method="post" style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
@@ -1180,6 +1252,14 @@ function nc_admin_statement_view_page( $id ) {
                         <?php endif; ?>
                     </td>
                 </tr>
+                <tr><td>Payment method</td><td style="text-align:right">Wise</td></tr>
+            </table>
+
+            <h3 style="margin-top:18px">Payment Summary</h3>
+            <table class="wp-list-table widefat striped" style="max-width:560px">
+                <tr><td>Required Points Pool Top-Up</td><td style="text-align:right">SGD <?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></td></tr>
+                <tr><td>Shared Cost</td><td style="text-align:right">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+                <tr style="background:#f0f0f0"><td><strong>Total Wise Transfer Required</strong></td><td style="text-align:right"><strong>SGD <?php echo esc_html( number_format( (float) $row->topup_required + (float) $row->shared_costs, 2 ) ); ?></strong></td></tr>
             </table>
 
             <!-- Detail -->
@@ -1657,7 +1737,8 @@ function nc_statement_build_pdf_html( $row ) {
             </tr>
         </table>
 
-        <h2>Summary</h2>
+        <h2>1. Points Pool Summary</h2>
+        <p class="muted" style="margin:0 0 6px">Nation Club point movements only.</p>
         <table class="summary">
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
             <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
@@ -1675,13 +1756,25 @@ function nc_statement_build_pdf_html( $row ) {
             <?php endif; ?>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>
-                <tr><td>Required reload to restore SGD 1,000</td><td class="num neg"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
+                <tr><td>Required Pool Top-Up to Minimum SGD 1,000</td><td class="num neg"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
             <?php endif; ?>
             <?php if ( $row->surplus > 0 ) : ?>
                 <tr><td>Surplus above SGD 1,000</td><td class="num pos"><strong><?php echo esc_html( number_format( (float) $row->surplus, 2 ) ); ?></strong></td></tr>
             <?php endif; ?>
-            <tr><td colspan="2" style="border:0;padding:4px 0"></td></tr>
-            <tr><td>Shared cost <span class="muted">(billed separately — not a pool movement)</span></td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+        </table>
+
+        <h2>2. Shared Cost</h2>
+        <p class="muted" style="margin:0 0 6px">Billed separately — not part of the Nation Club Points Pool.</p>
+        <table class="summary">
+            <tr><td>Shared cost</td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+            <tr><td>Payment method</td><td class="num">Wise</td></tr>
+        </table>
+
+        <h2>Payment Summary</h2>
+        <table class="summary">
+            <tr><td>Required Points Pool Top-Up</td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></td></tr>
+            <tr><td>Shared Cost</td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+            <tr class="closing"><td><strong>Total Wise Transfer Required</strong></td><td class="num"><strong>SGD <?php echo esc_html( number_format( (float) $row->topup_required + (float) $row->shared_costs, 2 ) ); ?></strong></td></tr>
         </table>
 
         <h2>Detail</h2>

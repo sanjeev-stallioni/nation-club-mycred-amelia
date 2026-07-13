@@ -1311,6 +1311,14 @@ function nc_admin_topup_handle_action() {
 
         $topup_id = nc_vendor_generate_topup_id( $row->id );
 
+        // Scope item 4: take any outstanding shared cost FIRST, then credit only
+        // the remainder to the points pool. Returns 0 when nothing is due.
+        $submitted   = round( (float) $row->amount, 2 );
+        $shared_paid = function_exists( 'nc_statement_collect_shared_cost' )
+            ? nc_statement_collect_shared_cost( (int) $row->vendor_id, $submitted )
+            : 0.0;
+        $pool_credit = round( $submitted - $shared_paid, 2 );
+
         $log_data = wp_json_encode( array(
             'topup_request_id' => (int) $row->id,
             'topup_id'         => $topup_id,
@@ -1320,33 +1328,40 @@ function nc_admin_topup_handle_action() {
             'approved_by'      => $admin_id,
         ) );
 
-        $entry = sprintf( 'Vendor top-up %s — SGD %s', $topup_id, number_format( (float) $row->amount, 2 ) );
+        $entry = $shared_paid > 0
+            ? sprintf( 'Vendor top-up %s — SGD %s to pool (SGD %s of SGD %s applied to shared cost)', $topup_id, number_format( $pool_credit, 2 ), number_format( $shared_paid, 2 ), number_format( $submitted, 2 ) )
+            : sprintf( 'Vendor top-up %s — SGD %s', $topup_id, number_format( $submitted, 2 ) );
 
-        $ok = mycred_add(
-            'vendor_topup',
-            (int) $row->vendor_id,
-            (float) $row->amount,
-            $entry,
-            $row->id,
-            $log_data
-        );
+        // Only credit the pool when there's a remainder. If the whole payment
+        // went to shared cost, no ledger entry is written (mycred rejects 0).
+        $log_id = 0;
+        if ( $pool_credit > 0 ) {
+            $ok = mycred_add(
+                'vendor_topup',
+                (int) $row->vendor_id,
+                $pool_credit,
+                $entry,
+                $row->id,
+                $log_data
+            );
 
-        if ( ! $ok ) {
-            wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'myCRED rejected the credit.' ), wp_get_referer() ) );
-            exit;
+            if ( ! $ok ) {
+                wp_safe_redirect( add_query_arg( 'nc_admin_err', rawurlencode( 'myCRED rejected the credit.' ), wp_get_referer() ) );
+                exit;
+            }
+
+            nc_vendor_check_low_balance( (int) $row->vendor_id );
+
+            // Find the log id we just created
+            $log_tbl = $wpdb->prefix . 'myCRED_log';
+            $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT id FROM {$log_tbl}
+                 WHERE user_id = %d AND ref = 'vendor_topup' AND ref_id = %d
+                 ORDER BY id DESC LIMIT 1",
+                (int) $row->vendor_id,
+                (int) $row->id
+            ) );
         }
-
-        nc_vendor_check_low_balance( (int) $row->vendor_id );
-
-        // Find the log id we just created
-        $log_tbl = $wpdb->prefix . 'myCRED_log';
-        $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT id FROM {$log_tbl}
-             WHERE user_id = %d AND ref = 'vendor_topup' AND ref_id = %d
-             ORDER BY id DESC LIMIT 1",
-            (int) $row->vendor_id,
-            (int) $row->id
-        ) );
 
         $wpdb->update( $tables['topup'], array(
             'status'        => 'approved',
@@ -1451,6 +1466,14 @@ function nc_admin_topup_handle_bulk() {
         if ( $bulk === 'approve' ) {
             if ( ! function_exists( 'mycred_add' ) ) { $skipped++; continue; }
             $topup_id = nc_vendor_generate_topup_id( $row->id );
+
+            // Scope item 4: shared cost first, remainder to pool.
+            $submitted   = round( (float) $row->amount, 2 );
+            $shared_paid = function_exists( 'nc_statement_collect_shared_cost' )
+                ? nc_statement_collect_shared_cost( (int) $row->vendor_id, $submitted )
+                : 0.0;
+            $pool_credit = round( $submitted - $shared_paid, 2 );
+
             $log_data = wp_json_encode( array(
                 'topup_request_id' => (int) $row->id,
                 'topup_id'         => $topup_id,
@@ -1460,15 +1483,21 @@ function nc_admin_topup_handle_bulk() {
                 'approved_by'      => $admin_id,
                 'bulk'             => true,
             ) );
-            $entry = sprintf( 'Vendor top-up %s — SGD %s', $topup_id, number_format( (float) $row->amount, 2 ) );
-            $ok    = mycred_add( 'vendor_topup', (int) $row->vendor_id, (float) $row->amount, $entry, $row->id, $log_data );
-            if ( ! $ok ) { $skipped++; continue; }
-            nc_vendor_check_low_balance( (int) $row->vendor_id );
-            $log_tbl = $wpdb->prefix . 'myCRED_log';
-            $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT id FROM {$log_tbl} WHERE user_id = %d AND ref = 'vendor_topup' AND ref_id = %d ORDER BY id DESC LIMIT 1",
-                (int) $row->vendor_id, (int) $row->id
-            ) );
+            $entry = $shared_paid > 0
+                ? sprintf( 'Vendor top-up %s — SGD %s to pool (SGD %s of SGD %s applied to shared cost)', $topup_id, number_format( $pool_credit, 2 ), number_format( $shared_paid, 2 ), number_format( $submitted, 2 ) )
+                : sprintf( 'Vendor top-up %s — SGD %s', $topup_id, number_format( $submitted, 2 ) );
+
+            $log_id = 0;
+            if ( $pool_credit > 0 ) {
+                $ok = mycred_add( 'vendor_topup', (int) $row->vendor_id, $pool_credit, $entry, $row->id, $log_data );
+                if ( ! $ok ) { $skipped++; continue; }
+                nc_vendor_check_low_balance( (int) $row->vendor_id );
+                $log_tbl = $wpdb->prefix . 'myCRED_log';
+                $log_id  = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT id FROM {$log_tbl} WHERE user_id = %d AND ref = 'vendor_topup' AND ref_id = %d ORDER BY id DESC LIMIT 1",
+                    (int) $row->vendor_id, (int) $row->id
+                ) );
+            }
             $wpdb->update( $tables['topup'], array(
                 'status'        => 'approved',
                 'topup_id'      => $topup_id,

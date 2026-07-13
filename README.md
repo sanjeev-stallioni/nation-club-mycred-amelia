@@ -16,10 +16,10 @@ Custom WordPress plugin that integrates [myCRED](https://mycred.me/) with [Ameli
    - **Same-vendor portion:** service vendor (= origin) receives NO `redeem_accept` — they were already debited at earn time, so re-crediting would refund a liability that's simply being cleared. Instead, an informational `same_vendor_clear` row (creds=0, cleared amount in `data.cleared_amount`) is written so the breakdown still shows the clearance. Net pool change for this portion: customer drops by X; vendor unchanged.
    - A single redemption can be **mixed** — e.g. 4 pts from same-vendor batch + 2 pts from another vendor's batch → one `same_vendor_clear` (4) + one `redeem_accept +2` for the same booking.
    - Customer side (`booking_redeem −X`) is always written for the full redeemed amount, regardless of split.
-3. **Vendor pool (admin-verified).** Vendors top up via Wise offline, submit proof in the portal, admin verifies the Wise payment and approves → system creates a proper `vendor_topup` ledger entry and credits the pool. No direct balance editing.
+3. **Vendor pool (admin-verified).** Vendors top up via Wise offline, submit proof in the portal, admin verifies the Wise payment and approves → system creates a proper `vendor_topup` ledger entry and credits the pool. No direct balance editing. When a vendor pays a **combined** Wise amount (pool top-up + shared cost), the approval **deducts the outstanding shared cost first** and credits only the remainder to the pool — the shared cost never enters the ledger (see #6).
 4. **Vendor withdrawals.** Vendors can request to withdraw surplus above SGD 1,000 only during the configurable monthly window (default 2nd–5th) AND only after last month's statement is Finalized & Sent. Admin reviews → approves → marks paid after Wise payout.
-5. **Monthly statements.** Auto-generated on the 1st of each month for every vendor. Per-vendor, per-month snapshot computed strictly from the points log: opening balance, accepted, earn liability, top-ups, withdrawals, expired, shared costs, closing, required reload, surplus. Simplified status flow: **Draft → Finalized & Sent** (one-click "Finalize & Send Email" combines locking the numbers with sending the PDF). Admin can revert to Draft if a fix is needed.
-6. **PDF + email + vendor portal.** Statements render to PDF via dompdf, emailed to vendors with the PDF attached, and downloadable by vendors from a portal shortcode.
+5. **Monthly statements (two-section).** Auto-generated on the 1st of each month for every vendor. Laid out as **1. Points Pool Summary** (point movements only — opening, accepted, earn liability, top-ups, withdrawals, closing, required pool top-up / surplus) and **2. Shared Cost** (billed separately via Wise), then a **Payment Summary** ending in **Total Wise Transfer Required = Required Pool Top-Up + Shared Cost**. The shared cost is **kept out of the points pool** — never subtracted from the closing balance and never written to the ledger. Shared cost is entered per statement (on a Draft, via Update & Regenerate); on top-up approval the system takes any outstanding shared cost first (`nc_statement_collect_shared_cost()`, tracked in the hidden `shared_cost_collected` column — one month per top-up, most-recent-unpaid first, never double-charged) and credits only the remainder to the pool. If the whole payment is shared cost, **no ledger entry is written and the pool doesn't move**; reconciliation is unaffected. Statements before June 2026 are treated as already settled offline. Simplified status flow: **Draft → Finalized & Sent** (one-click "Finalize & Send Email" combines locking the numbers with sending the PDF). Admin can revert to Draft if a fix is needed.
+6. **PDF + email + vendor portal + branding.** Statements render to PDF via dompdf, emailed to vendors with the PDF attached, and downloadable by vendors from a portal shortcode. The PDF is customisable from **Nation Club → Statement Branding**: centered logo, header text, background colour and/or full-page image, note text, and footer (images embedded as base64 data URIs since dompdf can't fetch remote URLs).
 7. **Email notification system.** Eight customizable templates (statement, top-up submitted/approved/rejected, withdrawal submitted/approved-rejected/paid, top-up reminder, low balance alert) with token replacement, plus a global CC field that copies every email to admin/accounts.
 8. **Top-up reminder cron.** On day 6 and 7 of each month, the system emails any vendor whose balance is below SGD 1,000 (skipping vendors whose pending top-up already covers the shortfall).
 9. **Event-based low-balance alert.** When a vendor's balance crosses below a configurable threshold (default SGD 300) — e.g. after a customer redemption settlement — they receive a one-time alert. The flag clears the moment they recover above the threshold.
@@ -77,7 +77,7 @@ Services not listed fall back to **5%**.
 | `redeem_accept` | + vendor | Serving vendor accepting the customer's redeemed points — **cross-vendor portion only**. Same-vendor portions are NOT credited (see `same_vendor_clear`). |
 | `same_vendor_clear` | **0** (informational) | Written for the same-vendor portion of a redemption. `creds = 0` (no pool impact). Cleared point count stored in `data.cleared_amount`. Written via direct `$wpdb->insert` since `mycred_add()` rejects 0-amount calls. Used by the breakdown UI, statement detail, and the reconciliation `same_vendor_absorbed` aggregation. |
 | `redeem_liability` | − vendor | **DEPRECATED.** Old origin-vendor settlement debit. No longer created — historical entries remain for audit. |
-| `vendor_topup` | + vendor | Admin-approved Wise top-up |
+| `vendor_topup` | + vendor | Admin-approved Wise top-up. Credited amount = submitted − any shared cost collected first; entry text notes the split when a shared cost was taken. No entry written when the whole payment goes to shared cost. |
 | `vendor_withdrawal` | − vendor | Admin-processed Wise payout |
 | `points_expiry` | − customer | Customer batch expired — paired with `expired_refund` on the origin vendor (net system effect zero) |
 | `expired_refund` | + vendor | Origin vendor refunded when a customer's points batch expires unredeemed |
@@ -119,7 +119,8 @@ Menu order (top to bottom):
 | Dashboard | `nc-reconciliation` | Live System Health Check + "This Month" rolling check + per-vendor breakdown + month-end snapshot history (paginated) |
 | Top-up Requests | `nation-club` | Review pending vendor top-up submissions; view payment proof; bulk approve/reject/delete |
 | Withdrawal Requests | `nc-withdrawals` | Review withdrawal requests; approve → mark paid with Wise reference; bulk actions |
-| Monthly Statements | `nc-statements` | Generate/regenerate statements; view detail; one-click Finalize & Send Email; manage Shared Costs; bulk actions; cron test buttons (incl. force-run per-batch expiry) |
+| Monthly Statements | `nc-statements` | Generate/regenerate statements; view detail (two-section: Points Pool Summary + Shared Cost + Payment Summary); one-click Finalize & Send Email; manage Shared Cost; bulk actions; cron test buttons (incl. force-run per-batch expiry) |
+| Statement Branding | `nc-statement-branding` | Customise the vendor statement PDF: centered logo, header text, background colour/image, note text, footer |
 | Email Templates | `nc-email-templates` | Tabbed WYSIWYG editor for all 8 email templates (statement, top-up flow, withdrawal flow, top-up reminder, low balance) |
 | Expiry Rules | `nc-expiry-rules` | Configure customer points expiry windows (date-only From/To/Expire fields, auto-rolls each January). Master switch to disable expiry entirely. |
 | Settings | `nc-settings` | Withdrawal window, admin notification recipients, Global CC, low-balance threshold |
@@ -188,7 +189,8 @@ nation-club-mycred-amelia/
 │   ├── mycred-hooks.php            # Reward / redeem / batch create / FIFO consume / log columns / CSV export
 │   ├── vendor-transactions.php     # [nc_vendor_history] shortcode (incl. expired_refund context popup)
 │   ├── vendor-pool.php             # Top-up + withdrawal flows + bulk + emails + low-balance check + menu order
-│   ├── vendor-statements.php       # Statements + Email Templates + Settings + cron + reminder
+│   ├── vendor-statements.php       # Statements + Email Templates + Settings + cron + reminder + shared-cost deduction
+│   ├── statement-branding.php      # Nation Club → Statement Branding — logo/header/bg/note/footer for the PDF
 │   ├── reconciliation.php          # Live dashboard + "This Month" check + month-end locked snapshots
 │   ├── customer-points-shortcode.php # [nc_my_points] customer/vendor page (balance + outstanding card + per-batch breakdown)
 │   ├── log-viewer.php              # Nation Club → Log admin page (mycred-debug.log viewer/download/clear)
@@ -206,7 +208,7 @@ nation-club-mycred-amelia/
 |-------|---------|
 | `wp_nc_topup_requests` | Vendor top-up submissions (pending/approved/rejected) |
 | `wp_nc_withdrawal_requests` | Vendor withdrawal requests (pending/approved/paid/rejected) |
-| `wp_nc_statements` | Monthly statement snapshots per vendor (Draft / Finalized & Sent) |
+| `wp_nc_statements` | Monthly statement snapshots per vendor (Draft / Finalized & Sent). Includes `shared_costs` and the hidden `shared_cost_collected` counter used by the top-up deduction. |
 | `wp_nc_reconciliation_snapshots` | Immutable month-end captures of system health numbers |
 | `wp_nc_customer_point_batches` | Per-customer earn batches (active / fully_redeemed / expired) — drives FIFO redemption + per-vendor expiry |
 | `wp_nc_appointment_reasons` | Cancellation / rejection reasons captured from the Amelia employee panel modal (one row per booking + status) |
