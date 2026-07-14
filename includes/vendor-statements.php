@@ -1244,9 +1244,7 @@ function nc_admin_statement_view_page( $id ) {
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
                 <tr><td>Vendor top-ups (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
                 <tr><td>Vendor withdrawals (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-                <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
-                <tr><td>Refund from expired customer points (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
-                <?php endif; ?>
+                <tr><td>Expired points returned to pool (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
                 <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
                 <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
                 <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
@@ -1775,9 +1773,7 @@ function nc_statement_build_pdf_html( $row ) {
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
             <tr><td>Vendor top-ups (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
             <tr><td>Vendor withdrawals (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-            <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
-            <tr><td>Refund from expired customer points (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
-            <?php endif; ?>
+            <tr><td>Expired points returned to pool (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
             <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
             <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
             <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
