@@ -165,6 +165,36 @@ function nc_statement_collect_shared_cost( $vendor_id, $amount ) {
     return round( $deduct, 2 );
 }
 
+/**
+ * Read-only counterpart of nc_statement_collect_shared_cost() — returns the
+ * vendor's currently outstanding shared cost (the amount the next top-up would
+ * deduct first) WITHOUT collecting anything. Used by the vendor top-up form to
+ * show the Shared Cost / Pool Top-Up breakdown before submission.
+ *
+ * @return float Outstanding shared cost on the most recent unpaid statement (0 if none).
+ */
+function nc_statement_outstanding_shared_cost( $vendor_id ) {
+    global $wpdb;
+
+    $vendor_id = (int) $vendor_id;
+    if ( $vendor_id <= 0 ) {
+        return 0.0;
+    }
+
+    $table = nc_statements_table();
+
+    $remaining = $wpdb->get_var( $wpdb->prepare(
+        "SELECT shared_costs - shared_cost_collected
+         FROM {$table}
+         WHERE vendor_id = %d AND shared_costs > shared_cost_collected
+         ORDER BY statement_month DESC
+         LIMIT 1",
+        $vendor_id
+    ) );
+
+    return $remaining ? round( (float) $remaining, 2 ) : 0.0;
+}
+
 /* -------------------------------------------------------------------------
  * 2. Computation helpers
  * ----------------------------------------------------------------------- */
@@ -315,8 +345,10 @@ function nc_statement_order_entries( $entries ) {
  *
  * @param int    $vendor_id
  * @param string $month_str    'YYYY-MM'
- * @param float  $shared_costs Admin-entered shared cost / subscription amount
- *                             for the month. Subtracted from closing balance.
+ * @param float  $shared_costs Admin-entered shared cost for the month. Billed
+ *                             separately (Wise) — kept OUT of the closing pool
+ *                             balance and the required top-up; shown in its own
+ *                             section and the Payment Summary only.
  */
 function nc_statement_compute( $vendor_id, $month_str, $shared_costs = 0 ) {
     $bounds  = nc_statement_month_bounds( $month_str );
@@ -1210,18 +1242,18 @@ function nc_admin_statement_view_page( $id ) {
             <p class="description" style="margin:0 0 8px">Nation Club point movements only.</p>
             <table class="wp-list-table widefat striped" style="max-width:560px">
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
-                <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
-                <?php if ( $same_vendor_cleared > 0 ) : ?>
-                <tr style="color:#888"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em><br><small>Customer redeemed points originally issued by this same vendor — already absorbed via earn_liability.</small></td><td style="text-align:right;font-style:italic"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
-                <?php endif; ?>
-                <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
-                <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
-                <tr><td>Points redeemed from vendor liability (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
-                <?php endif; ?>
                 <tr><td>Vendor top-ups (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
                 <tr><td>Vendor withdrawals (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
                 <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
                 <tr><td>Refund from expired customer points (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
+                <?php endif; ?>
+                <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+                <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
+                <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
+                <tr><td>Points redeemed from vendor liability (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
+                <?php endif; ?>
+                <?php if ( $same_vendor_cleared > 0 ) : ?>
+                <tr style="color:#888"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em><br><small>Customer redeemed points originally issued by this same vendor — already absorbed via earn_liability.</small></td><td style="text-align:right;font-style:italic"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
                 <?php endif; ?>
                 <tr style="background:#f0f0f0"><td><strong>Closing balance</strong></td><td style="text-align:right"><strong><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></strong></td></tr>
                 <?php if ( $row->topup_required > 0 ) : ?>
@@ -1237,7 +1269,7 @@ function nc_admin_statement_view_page( $id ) {
             <p class="description" style="margin:0 0 8px">Billed separately — not part of the Nation Club Points Pool.</p>
             <table class="wp-list-table widefat striped" style="max-width:560px">
                 <tr>
-                    <td>Shared cost</td>
+                    <td>Shared cost <small style="color:#888">(non-refundable)</small></td>
                     <td style="text-align:right">
                         <?php if ( $row->status === 'draft' ) : ?>
                             <form method="post" style="display:inline-flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
@@ -1741,18 +1773,18 @@ function nc_statement_build_pdf_html( $row ) {
         <p class="muted" style="margin:0 0 6px">Nation Club point movements only.</p>
         <table class="summary">
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
-            <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
-            <?php if ( $same_vendor_cleared > 0 ) : ?>
-            <tr class="muted"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em></td><td class="num muted"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
-            <?php endif; ?>
-            <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
-            <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
-            <tr><td>Points redeemed from vendor liability (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
-            <?php endif; ?>
             <tr><td>Vendor top-ups (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
             <tr><td>Vendor withdrawals (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
             <?php if ( (float) $row->points_expired_refund > 0 ) : ?>
             <tr><td>Refund from expired customer points (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
+            <?php endif; ?>
+            <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
+            <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
+            <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
+            <tr><td>Points redeemed from vendor liability (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_redeem_liability, 2 ) ); ?></td></tr>
+            <?php endif; ?>
+            <?php if ( $same_vendor_cleared > 0 ) : ?>
+            <tr class="muted"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em></td><td class="num muted"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
             <?php endif; ?>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>
@@ -1766,7 +1798,7 @@ function nc_statement_build_pdf_html( $row ) {
         <h2>2. Shared Cost</h2>
         <p class="muted" style="margin:0 0 6px">Billed separately — not part of the Nation Club Points Pool.</p>
         <table class="summary">
-            <tr><td>Shared cost</td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
+            <tr><td>Shared cost <span class="muted">(non-refundable)</span></td><td class="num">SGD <?php echo esc_html( number_format( (float) $row->shared_costs, 2 ) ); ?></td></tr>
             <tr><td>Payment method</td><td class="num">Wise</td></tr>
         </table>
 

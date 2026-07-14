@@ -106,6 +106,70 @@
     border-color: #4caf50;
 }
 
+/* -------- Shared-cost breakdown (below-minimum vendors) -------- */
+.nc-topup-breakdown {
+    background: #faf5f7;
+    border: 1px solid #ecd9e0;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 18px;
+}
+
+.nc-topup-breakdown__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 14px;
+    color: #444;
+}
+
+.nc-topup-breakdown__row small {
+    color: #999;
+    font-weight: 400;
+    font-size: 12px;
+}
+
+.nc-topup-breakdown__row--pool {
+    border-top: 1px dashed #e0cdd4;
+    font-weight: 600;
+    color: #2c2c2c;
+}
+
+.nc-topup-breakdown__val {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.nc-topup-breakdown__row--pool .nc-topup-breakdown__val {
+    color: #8b1c3b;
+}
+
+.nc-topup-breakdown__hint {
+    margin: 6px 0 0;
+    font-size: 12.5px;
+    color: #b3541e;
+}
+
+.nc-topup-consent {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #ecd9e0;
+    font-size: 13px;
+    color: #555;
+    line-height: 1.45;
+    cursor: pointer;
+}
+
+.nc-topup-consent input[type="checkbox"] {
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
 /* -------- Responsive -------- */
 @media (max-width: 600px) {
     .nc-topup-balance {

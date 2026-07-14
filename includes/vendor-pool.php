@@ -328,6 +328,17 @@ function nc_vendor_topup_form_render( $vendor_id ) {
 
     $balance = nc_vendor_pool_balance( $vendor_id );
 
+    // Shared-cost breakdown on the form: only shown for vendors BELOW the SGD
+    // 1,000 minimum who actually have an outstanding shared cost. Above-minimum
+    // vendors (and vendors with nothing owed) see the plain form. The figure is
+    // read-only preview — the real deduction still happens at admin approval.
+    $min_balance      = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? (float) NC_VENDOR_POOL_MIN_BALANCE : 1000.0;
+    $below_min        = $balance < $min_balance;
+    $shared_due       = ( $below_min && function_exists( 'nc_statement_outstanding_shared_cost' ) )
+        ? nc_statement_outstanding_shared_cost( $vendor_id )
+        : 0.0;
+    $show_breakdown   = ( $shared_due > 0 );
+
     // Paginate Recent Submissions
     $per_page = 10;
     $paged    = isset( $_GET['nc_topup_page'] ) ? max( 1, (int) $_GET['nc_topup_page'] ) : 1;
@@ -378,9 +389,27 @@ function nc_vendor_topup_form_render( $vendor_id ) {
                 <?php wp_nonce_field( 'nc_vendor_submit_topup' ); ?>
 
                 <div class="nc-field">
-                    <label for="nc_topup_amount">Amount (SGD)<span class="nc-required">*</span></label>
-                    <input type="number" step="0.01" min="1" id="nc_topup_amount" name="amount" placeholder="e.g. 1000.00" required>
+                    <label for="nc_topup_amount"><?php echo $show_breakdown ? 'Total Amount (SGD)' : 'Amount (SGD)'; ?><span class="nc-required">*</span></label>
+                    <input type="number" step="0.01" min="1" id="nc_topup_amount" name="amount" placeholder="e.g. 1000.00" required<?php echo $show_breakdown ? ' data-shared-due="' . esc_attr( number_format( $shared_due, 2, '.', '' ) ) . '"' : ''; ?>>
                 </div>
+
+                <?php if ( $show_breakdown ) : ?>
+                    <div class="nc-topup-breakdown" id="nc-topup-breakdown">
+                        <div class="nc-topup-breakdown__row">
+                            <span>Shared Cost <small>(deducted first)</small></span>
+                            <span class="nc-topup-breakdown__val">SGD <?php echo esc_html( number_format( $shared_due, 2 ) ); ?></span>
+                        </div>
+                        <div class="nc-topup-breakdown__row nc-topup-breakdown__row--pool">
+                            <span>Pool Top-Up <small>(credited to your pool)</small></span>
+                            <span class="nc-topup-breakdown__val" id="nc-topup-pool-val">SGD 0.00</span>
+                        </div>
+                        <p class="nc-topup-breakdown__hint" id="nc-topup-underpay" style="display:none">Your total is below the shared cost — the whole amount will go to the shared cost and nothing to your pool.</p>
+                        <label class="nc-topup-consent">
+                            <input type="checkbox" id="nc_topup_consent" name="nc_shared_consent" value="1" required>
+                            <span>I understand the shared cost of <strong>SGD <?php echo esc_html( number_format( $shared_due, 2 ) ); ?></strong> will be deducted first, and only the remaining balance will be credited to my Points Pool.</span>
+                        </label>
+                    </div>
+                <?php endif; ?>
 
                 <div class="nc-field">
                     <label for="nc_topup_date">Transfer Date<span class="nc-required">*</span></label>
@@ -484,6 +513,19 @@ function nc_vendor_handle_topup_submission() {
     }
     if ( empty( $transfer_date ) ) {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Transfer date is required.' ) ), $redirect ) );
+        exit;
+    }
+
+    // Consent gate: mirrors the form's breakdown condition (vendor below the SGD
+    // 1,000 minimum with an outstanding shared cost). Re-checked server-side so
+    // the agreement can't be bypassed. Vendors without a shared cost due — and
+    // those already at/above the minimum — are never asked and never blocked.
+    $min_balance = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? (float) NC_VENDOR_POOL_MIN_BALANCE : 1000.0;
+    if ( nc_vendor_pool_balance( $vendor_id ) < $min_balance
+        && function_exists( 'nc_statement_outstanding_shared_cost' )
+        && nc_statement_outstanding_shared_cost( $vendor_id ) > 0
+        && empty( $_POST['nc_shared_consent'] ) ) {
+        wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Please agree to the shared cost being deducted first.' ) ), $redirect ) );
         exit;
     }
     if ( empty( $_FILES['payment_proof']['name'] ) ) {
@@ -1313,8 +1355,14 @@ function nc_admin_topup_handle_action() {
 
         // Scope item 4: take any outstanding shared cost FIRST, then credit only
         // the remainder to the points pool. Returns 0 when nothing is due.
+        // Client rule: shared cost is deducted ONLY for vendors below the SGD
+        // 1,000 minimum. Vendors already at/above the minimum keep the full
+        // top-up in their pool (no shared-cost deduction) — they settle shared
+        // cost separately. Balance is read before crediting.
         $submitted   = round( (float) $row->amount, 2 );
-        $shared_paid = function_exists( 'nc_statement_collect_shared_cost' )
+        $min_balance = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? (float) NC_VENDOR_POOL_MIN_BALANCE : 1000.0;
+        $shared_paid = ( nc_vendor_pool_balance( (int) $row->vendor_id ) < $min_balance
+            && function_exists( 'nc_statement_collect_shared_cost' ) )
             ? nc_statement_collect_shared_cost( (int) $row->vendor_id, $submitted )
             : 0.0;
         $pool_credit = round( $submitted - $shared_paid, 2 );
@@ -1467,9 +1515,13 @@ function nc_admin_topup_handle_bulk() {
             if ( ! function_exists( 'mycred_add' ) ) { $skipped++; continue; }
             $topup_id = nc_vendor_generate_topup_id( $row->id );
 
-            // Scope item 4: shared cost first, remainder to pool.
+            // Scope item 4: shared cost first, remainder to pool — but ONLY for
+            // vendors below the SGD 1,000 minimum (client rule). At/above the
+            // minimum the full top-up goes to the pool.
             $submitted   = round( (float) $row->amount, 2 );
-            $shared_paid = function_exists( 'nc_statement_collect_shared_cost' )
+            $min_balance = defined( 'NC_VENDOR_POOL_MIN_BALANCE' ) ? (float) NC_VENDOR_POOL_MIN_BALANCE : 1000.0;
+            $shared_paid = ( nc_vendor_pool_balance( (int) $row->vendor_id ) < $min_balance
+                && function_exists( 'nc_statement_collect_shared_cost' ) )
                 ? nc_statement_collect_shared_cost( (int) $row->vendor_id, $submitted )
                 : 0.0;
             $pool_credit = round( $submitted - $shared_paid, 2 );

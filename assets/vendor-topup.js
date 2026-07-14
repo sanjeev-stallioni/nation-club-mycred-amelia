@@ -28,6 +28,34 @@
         var filePrim  = form.querySelector('.nc-topup-file__primary');
         var fileSec   = form.querySelector('.nc-topup-file__secondary');
         var submitBtn = form.querySelector('.nc-btn--primary');
+        var amountInput = form.querySelector('input[name="amount"]');
+
+        // Live Shared Cost / Pool Top-Up breakdown (only present for vendors
+        // below the minimum with an outstanding shared cost).
+        var sharedDue   = amountInput ? parseFloat(amountInput.getAttribute('data-shared-due')) : NaN;
+        var poolVal     = document.getElementById('nc-topup-pool-val');
+        var underpayMsg = document.getElementById('nc-topup-underpay');
+        var consentBox  = document.getElementById('nc_topup_consent');
+
+        function money(n) {
+            return 'SGD ' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+
+        function recalcBreakdown() {
+            if (!poolVal || isNaN(sharedDue)) return;
+            var total = parseFloat(amountInput.value) || 0;
+            var pool  = total - sharedDue;
+            if (pool < 0) { pool = 0; }
+            poolVal.textContent = money(pool);
+            if (underpayMsg) {
+                underpayMsg.style.display = (total > 0 && total < sharedDue) ? '' : 'none';
+            }
+        }
+
+        if (amountInput && poolVal && !isNaN(sharedDue)) {
+            amountInput.addEventListener('input', recalcBreakdown);
+            recalcBreakdown();
+        }
 
         if (fileInput && fileWrap) {
             fileInput.addEventListener('change', function () {
@@ -67,6 +95,11 @@
             if (!fileInput || !fileInput.files || !fileInput.files[0]) {
                 e.preventDefault();
                 alert('Payment proof is required.');
+                return;
+            }
+            if (consentBox && !consentBox.checked) {
+                e.preventDefault();
+                alert('Please agree to the shared cost being deducted first.');
                 return;
             }
             if (submitBtn) {
