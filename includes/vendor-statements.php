@@ -1244,7 +1244,6 @@ function nc_admin_statement_view_page( $id ) {
                 <tr><td>Opening Points Pool balance</td><td style="text-align:right"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
                 <tr><td>Vendor top-ups (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
                 <tr><td>Vendor withdrawals (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-                <tr><td>Expired points returned to pool (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
                 <tr><td>Points issued to customers (−)</td><td style="text-align:right;color:#c62828">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
                 <tr><td>Points accepted from customers (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
                 <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
@@ -1253,6 +1252,7 @@ function nc_admin_statement_view_page( $id ) {
                 <?php if ( $same_vendor_cleared > 0 ) : ?>
                 <tr style="color:#888"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em><br><small>Customer redeemed points originally issued by this same vendor — already absorbed via earn_liability.</small></td><td style="text-align:right;font-style:italic"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
                 <?php endif; ?>
+                <tr><td>Expired points returned to pool (+)</td><td style="text-align:right;color:#1a8d2e">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
                 <tr style="background:#f0f0f0"><td><strong>Closing balance</strong></td><td style="text-align:right"><strong><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></strong></td></tr>
                 <?php if ( $row->topup_required > 0 ) : ?>
                     <tr><td>Required Pool Top-Up to Minimum SGD 1,000</td><td style="text-align:right;color:#b32d2e"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
@@ -1773,7 +1773,6 @@ function nc_statement_build_pdf_html( $row ) {
             <tr><td>Opening Points Pool balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->opening_balance, 2 ) ); ?></td></tr>
             <tr><td>Vendor top-ups (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_topup, 2 ) ); ?></td></tr>
             <tr><td>Vendor withdrawals (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_withdrawal, 2 ) ); ?></td></tr>
-            <tr><td>Expired points returned to pool (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
             <tr><td>Points issued to customers (−)</td><td class="num neg">−<?php echo esc_html( number_format( (float) $row->points_earn_liability, 2 ) ); ?></td></tr>
             <tr><td>Points accepted from customers (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_accepted, 2 ) ); ?></td></tr>
             <?php if ( (float) $row->points_redeem_liability > 0 ) : ?>
@@ -1782,6 +1781,7 @@ function nc_statement_build_pdf_html( $row ) {
             <?php if ( $same_vendor_cleared > 0 ) : ?>
             <tr class="muted"><td><em>Same-vendor points cleared (informational, 0 pool impact)</em></td><td class="num muted"><?php echo esc_html( number_format( $same_vendor_cleared, 2 ) ); ?></td></tr>
             <?php endif; ?>
+            <tr><td>Expired points returned to pool (+)</td><td class="num pos">+<?php echo esc_html( number_format( (float) $row->points_expired_refund, 2 ) ); ?></td></tr>
             <tr class="closing"><td>Closing balance</td><td class="num"><?php echo esc_html( number_format( (float) $row->closing_balance, 2 ) ); ?></td></tr>
             <?php if ( $row->topup_required > 0 ) : ?>
                 <tr><td>Required Pool Top-Up to Minimum SGD 1,000</td><td class="num neg"><strong><?php echo esc_html( number_format( (float) $row->topup_required, 2 ) ); ?></strong></td></tr>
