@@ -30,8 +30,13 @@ if ( ! defined( 'ABSPATH' ) ) {
  * 1. Schema
  * ----------------------------------------------------------------------- */
 
-define( 'NC_VENDOR_POOL_DB_VERSION', '1.0.0' );
+// 1.1.0 — adds attachment_path so payment proofs can live outside the web root (NC-13).
+define( 'NC_VENDOR_POOL_DB_VERSION', '1.1.0' );
 define( 'NC_VENDOR_POOL_MIN_BALANCE', 1000 );
+// Upper bound on a single top-up submission (NC-23). Generous enough for any
+// real Wise transfer, small enough that a fat-fingered or hostile amount can't
+// reach the approval queue.
+define( 'NC_VENDOR_TOPUP_MAX_AMOUNT', 100000 );
 
 function nc_vendor_pool_tables() {
     global $wpdb;
@@ -39,6 +44,51 @@ function nc_vendor_pool_tables() {
         'topup'      => $wpdb->prefix . 'nc_topup_requests',
         'withdrawal' => $wpdb->prefix . 'nc_withdrawal_requests',
     );
+}
+
+/**
+ * Absolute path of the private directory that holds top-up payment proofs.
+ *
+ * NC-13 (VAPT 2026-07-24): proofs used to live in wp-content/uploads, where the
+ * web server hands them out to anyone with the URL — the 24-hex filename was
+ * the only barrier, and filenames leak (logs, referrers, CDN caches, forwarded
+ * links). Files now live outside the document root and are only reachable
+ * through nc_admin_stream_topup_proof().
+ *
+ * Resolution order:
+ *   1. NC_PROOF_STORAGE_DIR, if the site defines it in wp-config.php
+ *   2. WP Engine's _wpeprivate, which sits beside the docroot and is never served
+ *   3. wp-content/nc-topup-proofs, hardened with .htaccess + index.php
+ *
+ * Option 3 is a fallback, not a destination: on nginx (WP Engine included)
+ * .htaccess is ignored, so verify the directory is unreachable or set
+ * NC_PROOF_STORAGE_DIR to somewhere that is.
+ *
+ * @return string|WP_Error Directory path with no trailing slash.
+ */
+function nc_vendor_proof_storage_dir() {
+    if ( defined( 'NC_PROOF_STORAGE_DIR' ) && NC_PROOF_STORAGE_DIR ) {
+        $dir = rtrim( NC_PROOF_STORAGE_DIR, '/\\' );
+    } else {
+        $wpe_private = dirname( untrailingslashit( ABSPATH ) ) . '/_wpeprivate';
+        $dir = is_dir( $wpe_private ) && is_writable( $wpe_private )
+            ? $wpe_private . '/nc-topup-proofs'
+            : WP_CONTENT_DIR . '/nc-topup-proofs';
+    }
+
+    if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
+        return new WP_Error( 'nc_proof_dir', 'Could not create the secure storage directory for payment proofs.' );
+    }
+
+    // Belt and braces for the wp-content fallback. Harmless elsewhere.
+    if ( ! file_exists( $dir . '/.htaccess' ) ) {
+        @file_put_contents( $dir . '/.htaccess', "Require all denied\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n" );
+    }
+    if ( ! file_exists( $dir . '/index.php' ) ) {
+        @file_put_contents( $dir . '/index.php', "<?php // Silence is golden.\n" );
+    }
+
+    return $dir;
 }
 
 function nc_vendor_pool_install() {
@@ -56,6 +106,7 @@ function nc_vendor_pool_install() {
         wise_reference VARCHAR(191) DEFAULT NULL,
         attachment_id BIGINT UNSIGNED DEFAULT NULL,
         attachment_url TEXT DEFAULT NULL,
+        attachment_path TEXT DEFAULT NULL,
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         topup_id VARCHAR(40) DEFAULT NULL,
         mycred_log_id BIGINT UNSIGNED DEFAULT NULL,
@@ -511,6 +562,14 @@ function nc_vendor_handle_topup_submission() {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Amount must be greater than zero.' ) ), $redirect ) );
         exit;
     }
+    // NC-23 (VAPT 2026-07-24) — no upper bound meant 999,999,999.99 was
+    // accepted straight into the pending queue, ready for a mis-click to
+    // approve. Admin approval is the real control, but junk this size should
+    // never reach the reviewer in the first place.
+    if ( $amount > NC_VENDOR_TOPUP_MAX_AMOUNT ) {
+        wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Amount exceeds the maximum of SGD ' . number_format( NC_VENDOR_TOPUP_MAX_AMOUNT, 2 ) . ' per request.' ) ), $redirect ) );
+        exit;
+    }
     if ( empty( $transfer_date ) ) {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Transfer date is required.' ) ), $redirect ) );
         exit;
@@ -528,6 +587,24 @@ function nc_vendor_handle_topup_submission() {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Please agree to the shared cost being deducted first.' ) ), $redirect ) );
         exit;
     }
+    // NC-23 — one Wise transfer must not be claimable twice. A reference this
+    // vendor already has on file blocks the submission unless the earlier
+    // request was rejected (in which case a genuine re-submission is fine).
+    if ( $wise_ref !== '' ) {
+        global $wpdb;
+        $dup_tables = nc_vendor_pool_tables();
+        $duplicate  = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$dup_tables['topup']}
+              WHERE vendor_id = %d AND wise_reference = %s AND status <> 'rejected'",
+            $vendor_id,
+            $wise_ref
+        ) );
+        if ( $duplicate > 0 ) {
+            wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'This Wise reference has already been submitted. Please check your top-up history.' ) ), $redirect ) );
+            exit;
+        }
+    }
+
     if ( empty( $_FILES['payment_proof']['name'] ) ) {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Payment proof is required.' ) ), $redirect ) );
         exit;
@@ -556,50 +633,63 @@ function nc_vendor_handle_topup_submission() {
         exit;
     }
 
+    // NC-35 (VAPT 2026-07-24) — wp_handle_upload only inspects the FINAL
+    // extension, so a PNG-magic polyglot named "x.php.png" passed both the
+    // content and the extension check. Inspect every dot-segment instead.
+    $name_segments = explode( '.', strtolower( $file['name'] ) );
+    array_shift( $name_segments ); // the base name is not an extension
+    $blocked_ext = array(
+        'php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phtml', 'phps', 'phar',
+        'shtml', 'htaccess', 'htm', 'html', 'js', 'cgi', 'pl', 'py', 'sh',
+    );
+    if ( array_intersect( $name_segments, $blocked_ext ) ) {
+        wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'That file name is not allowed. Please rename the file and try again.' ) ), $redirect ) );
+        exit;
+    }
+
     $upload = wp_handle_upload( $file, array( 'test_form' => false, 'mimes' => $allowed_mimes ) );
     if ( isset( $upload['error'] ) ) {
         wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( $upload['error'] ) ), $redirect ) );
         exit;
     }
 
-    // Rename to unguessable filename so the raw URL isn't useful to anyone
-    // who doesn't come through the admin-gated view handler.
-    $ext           = pathinfo( $upload['file'], PATHINFO_EXTENSION );
-    $hashed_name   = 'nc-proof-' . bin2hex( random_bytes( 12 ) ) . ( $ext ? '.' . strtolower( $ext ) : '' );
-    $hashed_path   = dirname( $upload['file'] ) . DIRECTORY_SEPARATOR . $hashed_name;
-    if ( @rename( $upload['file'], $hashed_path ) ) {
-        $upload['file'] = $hashed_path;
-        $upload['url']  = trailingslashit( dirname( $upload['url'] ) ) . $hashed_name;
+    // NC-13 — move the proof out of the web root immediately. wp_handle_upload
+    // has to land it in uploads/ first, so it is briefly public; the move below
+    // is mandatory, and a failure deletes the file rather than leaving bank
+    // details sitting in a served directory.
+    $proof_dir = nc_vendor_proof_storage_dir();
+    if ( is_wp_error( $proof_dir ) ) {
+        @unlink( $upload['file'] );
+        wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( $proof_dir->get_error_message() ) ), $redirect ) );
+        exit;
     }
 
-    $attachment_id = wp_insert_attachment( array(
-        'post_mime_type' => $upload['type'],
-        'post_title'     => sanitize_file_name( basename( $upload['file'] ) ),
-        'post_content'   => '',
-        'post_status'    => 'private',
-    ), $upload['file'] );
+    $ext         = strtolower( pathinfo( $upload['file'], PATHINFO_EXTENSION ) );
+    $hashed_name = 'nc-proof-' . bin2hex( random_bytes( 12 ) ) . ( $ext ? '.' . $ext : '' );
+    $proof_path  = $proof_dir . DIRECTORY_SEPARATOR . $hashed_name;
 
-    if ( ! is_wp_error( $attachment_id ) ) {
-        wp_update_attachment_metadata( $attachment_id, wp_generate_attachment_metadata( $attachment_id, $upload['file'] ) );
-    } else {
-        $attachment_id = 0;
+    if ( ! @rename( $upload['file'], $proof_path ) ) {
+        @unlink( $upload['file'] );
+        wp_safe_redirect( add_query_arg( array( 'nc_topup' => 'error', 'nc_msg' => rawurlencode( 'Could not store the payment proof securely. Please try again or contact the administrator.' ) ), $redirect ) );
+        exit;
     }
+    @chmod( $proof_path, 0640 );
 
     global $wpdb;
     $tables = nc_vendor_pool_tables();
 
-    // attachment_url column retained for backward compatibility but no longer
-    // exposed in the admin UI — admins view via the guarded stream handler.
+    // No wp_insert_attachment any more: an attachment implies a public URL and
+    // a Media Library entry. attachment_id / attachment_url stay NULL on new
+    // rows and are read only for pre-fix records.
     $wpdb->insert( $tables['topup'], array(
-        'vendor_id'      => $vendor_id,
-        'amount'         => $amount,
-        'transfer_date'  => $transfer_date,
-        'wise_reference' => $wise_ref,
-        'attachment_id'  => $attachment_id ?: null,
-        'attachment_url' => $upload['url'],
-        'status'         => 'pending',
-        'created_at'     => current_time( 'mysql' ),
-    ), array( '%d', '%f', '%s', '%s', '%d', '%s', '%s', '%s' ) );
+        'vendor_id'       => $vendor_id,
+        'amount'          => $amount,
+        'transfer_date'   => $transfer_date,
+        'wise_reference'  => $wise_ref,
+        'attachment_path' => $proof_path,
+        'status'          => 'pending',
+        'created_at'      => current_time( 'mysql' ),
+    ), array( '%d', '%f', '%s', '%s', '%s', '%s', '%s' ) );
 
     $request_id = (int) $wpdb->insert_id;
 
@@ -649,14 +739,30 @@ function nc_admin_stream_topup_proof() {
     global $wpdb;
     $tables = nc_vendor_pool_tables();
     $row    = $wpdb->get_row( $wpdb->prepare(
-        "SELECT attachment_id, attachment_url FROM {$tables['topup']} WHERE id = %d",
+        "SELECT attachment_id, attachment_path FROM {$tables['topup']} WHERE id = %d",
         $topup_id
     ) );
     if ( ! $row ) {
         wp_die( 'Top-up request not found.' );
     }
 
-    $file = $row->attachment_id ? get_attached_file( (int) $row->attachment_id ) : '';
+    // New rows carry attachment_path (private store). Rows created before the
+    // NC-13 fix only have attachment_id, so fall back to the Media Library.
+    $file = '';
+    if ( ! empty( $row->attachment_path ) ) {
+        $file      = (string) $row->attachment_path;
+        $proof_dir = nc_vendor_proof_storage_dir();
+        // Path traversal guard: only ever serve out of the proof directory.
+        $real      = realpath( $file );
+        $real_dir  = is_wp_error( $proof_dir ) ? false : realpath( $proof_dir );
+        if ( ! $real || ! $real_dir || strpos( $real, $real_dir . DIRECTORY_SEPARATOR ) !== 0 ) {
+            wp_die( 'Payment proof path is not valid.' );
+        }
+        $file = $real;
+    } elseif ( $row->attachment_id ) {
+        $file = get_attached_file( (int) $row->attachment_id );
+    }
+
     if ( ! $file || ! file_exists( $file ) ) {
         wp_die( 'Attached file missing on server.' );
     }
@@ -1216,7 +1322,7 @@ function nc_admin_topup_page() {
                     <td><?php echo esc_html( $row->transfer_date ?: '—' ); ?></td>
                     <td><?php echo esc_html( $row->wise_reference ?: '—' ); ?></td>
                     <td>
-                        <?php if ( $row->attachment_id ) :
+                        <?php if ( ! empty( $row->attachment_path ) || $row->attachment_id ) :
                             $proof_url = esc_url( add_query_arg(
                                 array(
                                     'action'   => 'nc_view_topup_proof',

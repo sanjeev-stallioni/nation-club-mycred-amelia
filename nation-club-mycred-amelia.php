@@ -52,6 +52,7 @@ add_action('wp_enqueue_scripts', 'enqueue_amelia_custom_js');
 require_once NC_MYCRE_AMELIA_PATH . 'includes/nc_log.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/expiry-rules.php';            // Defines get_mycred_customer_expiry_timestamp() — must load BEFORE mycred-hooks.php
 require_once NC_MYCRE_AMELIA_PATH . 'includes/customer-point-batches.php'; // Per-batch expiry — must load BEFORE mycred-hooks.php (earn/redeem hooks call into it)
+require_once NC_MYCRE_AMELIA_PATH . 'includes/invoice-guard.php';          // Blocks customer-supplied Invoice Amount — defines nc_invoice_field_key(), used by mycred-hooks.php
 require_once NC_MYCRE_AMELIA_PATH . 'includes/mycred-hooks.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-transactions.php';
 require_once NC_MYCRE_AMELIA_PATH . 'includes/vendor-pool.php';

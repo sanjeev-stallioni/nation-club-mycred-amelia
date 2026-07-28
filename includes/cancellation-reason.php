@@ -162,6 +162,15 @@ function nc_ajax_save_cancellation_reason() {
         wp_send_json_error( array( 'message' => 'Could not resolve booking. Please reload the page and try again.' ) );
     }
 
+    // NC-09 (VAPT 2026-07-24) — missing authorization. The nonce made this
+    // CSRF-safe but proved nothing about ownership: any logged-in user could
+    // post an arbitrary customer_booking_id and have us write an admin-visible
+    // log row, email that booking's customer, and DELETE the Amelia booking
+    // record below. Bind the booking to the caller before touching anything.
+    if ( ! nc_cancellation_user_can_manage_booking( get_current_user_id(), $customer_booking_id ) ) {
+        wp_send_json_error( array( 'message' => 'You are not allowed to update this booking.' ), 403 );
+    }
+
     global $wpdb;
     $row = nc_cancellation_resolve_booking_context( $appointment_id, $customer_booking_id );
 
@@ -240,6 +249,51 @@ function nc_ajax_save_cancellation_reason() {
     }
 
     wp_send_json_success( array( 'id' => $row_id ) );
+}
+
+/**
+ * True when $user_id is allowed to record a cancellation against a booking.
+ *
+ * Administrators may act on anything. Everyone else must be the Amelia
+ * provider on the appointment that owns the booking. Because the booking has
+ * to exist for the join to match, this doubles as the existence check that
+ * NC-09 found missing — a made-up id simply returns 0 rows and is refused.
+ *
+ * @return bool
+ */
+function nc_cancellation_user_can_manage_booking( $user_id, $customer_booking_id ) {
+    $user_id             = (int) $user_id;
+    $customer_booking_id = (int) $customer_booking_id;
+
+    if ( $user_id <= 0 || $customer_booking_id <= 0 ) {
+        return false;
+    }
+    if ( user_can( $user_id, 'manage_options' ) ) {
+        return true;
+    }
+
+    global $wpdb;
+    $b = $wpdb->prefix . 'amelia_customer_bookings';
+    $a = $wpdb->prefix . 'amelia_appointments';
+    $u = $wpdb->prefix . 'amelia_users';
+
+    $provider_id = (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT id FROM {$u} WHERE externalId = %d AND type = 'provider' LIMIT 1",
+        $user_id
+    ) );
+    if ( $provider_id <= 0 ) {
+        return false;
+    }
+
+    return (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COUNT(*)
+           FROM {$b} cb
+           JOIN {$a} ap ON ap.id = cb.appointmentId
+          WHERE cb.id = %d
+            AND ap.providerId = %d",
+        $customer_booking_id,
+        $provider_id
+    ) ) > 0;
 }
 
 /**

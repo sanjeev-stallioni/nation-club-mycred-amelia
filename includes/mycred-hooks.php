@@ -164,14 +164,27 @@ function mycred_process_appointment($appointment, $trigger)
             return;
         }
 
-        // Parse invoice from customFields
-        if (is_array($custom_fields) && !empty($custom_fields)) {
-            foreach ($custom_fields as $field) {
+        // Parse invoice from customFields. nc_invoice_field_key() matches the
+        // configured Amelia field ID first and only falls back to the label
+        // search — the custom fields are drag-reorderable in the admin, so a
+        // second "invoice"-ish field could otherwise change which number we
+        // pay points on. See includes/invoice-guard.php.
+        $invoice_key = function_exists('nc_invoice_field_key') ? nc_invoice_field_key($custom_fields) : null;
+
+        // Fallback only if invoice-guard.php somehow isn't loaded. Capture the
+        // key as well as the value — the redemption step below writes back to
+        // $invoice_key, so leaving it null here would silently skip that write.
+        if ($invoice_key === null && is_array($custom_fields) && !empty($custom_fields)) {
+            foreach ($custom_fields as $k => $field) {
                 if (is_array($field) && isset($field['label']) && stripos($field['label'], 'invoice') !== false) {
-                    $invoice_amount = floatval($field['value'] ?? 0);
+                    $invoice_key = $k;
                     break;
                 }
             }
+        }
+
+        if ($invoice_key !== null && isset($custom_fields[$invoice_key])) {
+            $invoice_amount = floatval($custom_fields[$invoice_key]['value'] ?? 0);
         }
 
         if ($invoice_amount <= 0) {
@@ -253,13 +266,11 @@ function mycred_process_appointment($appointment, $trigger)
                 }
             }
 
-            if (is_array($custom_fields) && !empty($custom_fields)) {
-                foreach ($custom_fields as $k => $fld) {
-                    if (is_array($fld) && isset($fld['label']) && stripos($fld['label'], 'invoice') !== false) {
-                        $custom_fields[$k]['value'] = number_format($new_invoice_amount, 2, '.', '');
-                        break;
-                    }
-                }
+            // Write the reduced invoice back to the SAME field we read it from
+            // ($invoice_key), so a second "invoice"-ish custom field can never
+            // leave us reading one field and updating another.
+            if ($invoice_key !== null && is_array($custom_fields) && isset($custom_fields[$invoice_key])) {
+                $custom_fields[$invoice_key]['value'] = number_format($new_invoice_amount, 2, '.', '');
                 $wpdb->update($amelia_bookings_tbl, ['customFields' => wp_json_encode($custom_fields)], ['id' => $bookingId]);
             }
 
@@ -567,6 +578,20 @@ function get_customer_mycred_points()
         wp_send_json_error('User not found');
     }
 
+    // NC-05 (VAPT 2026-07-24) — broken object-level authorization.
+    // The nonce only proves the request came from our page; it is not a
+    // permission, and any logged-in customer could mint one and read every
+    // member's balance by email. This lookup exists for the vendor "Last
+    // Service" panel, so restrict it to Amelia providers and admins. Anyone
+    // else may only ask about themselves.
+    $caller_id = get_current_user_id();
+    $is_vendor = function_exists('nc_vendor_is_provider') && nc_vendor_is_provider($caller_id);
+    if (! $is_vendor
+        && ! current_user_can('manage_options')
+        && (int) $customer_wp->ID !== (int) $caller_id) {
+        wp_send_json_error('Unauthorized', 403);
+    }
+
     if (! function_exists('mycred_get_users_balance')) {
         wp_send_json_error('myCred not available');
     }
@@ -671,7 +696,10 @@ function get_customer_mycred_points()
 }
 
 add_action('wp_ajax_get_mycred_points', 'get_customer_mycred_points');
-add_action('wp_ajax_nopriv_get_mycred_points', 'get_customer_mycred_points');
+// NC-05: the nopriv registration is deliberately gone. This endpoint is only
+// ever called from the Amelia employee panel, which requires a login, and
+// leaving it open meant anonymous callers could mint a valid nonce (logged-out
+// nonces share one token) and read any member's balance.
 // If needed for non-logged-in, but Employee Panel requires login.
 
 
